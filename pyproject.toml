@@ -1,0 +1,6 @@
+[project]
+name = "hecate"
+version = "0.1.0"
+description = "Data relay service between Ogmios and Exura"
+requires-python = ">=3.12"
+dependencies = []
