@@ -1,11 +1,11 @@
-# Hecate 🔮 <img align="right" width="150" height="150" src=".github/assets/hecate_logo.png">
+# Hecate 🔮 <img align="right" width="200" height="200" src=".github/assets/hecate_logo.png">
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 [![Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Mypy](https://img.shields.io/badge/types-mypy-blue.svg)](http://mypy-lang.org/)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit)](https://github.com/pre-commit/pre-commit)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 > The magical gateway between Ogmios and Exura for Cardano blockchain synchronization
 
@@ -18,7 +18,7 @@ Hecate is the data relay service that powers Exura, connecting to the Cardano bl
 ```
 ┌─────────────┐      ┌─────────────┐      ┌───────────────────┐      ┌───────────┐
 │             │      │             │      │      HECATE       │      │           │
-│   CARDANO   │─────►│   OGMIOS    │─────►│                   │─────►│   EXURA   │
+│   CARDANO   │─────►│   OGMIOS    │─────►│                   │      │   EXURA   │
 │    NODE     │      │  WebSockets │      │  ┌─────────────┐  │      │           │
 └─────────────┘      └─────────────┘      │  │   Prefect   │  │      └───────────┘
                                           │  │    Flows    │  │            ▲
@@ -65,7 +65,7 @@ git clone https://github.com/ExuraLabs/hecate.git
 cd hecate
 
 # Install dependencies
-uv venv
+uv venv -p 3.12
 uv sync --all-groups
 
 # Set up environment variables
@@ -174,6 +174,6 @@ This project is licensed under the Apache 2.0 License - see the LICENSE file for
 
 ## Acknowledgements
 
-- [Ogmios](https://github.com/input-output-hk/ogmios) - WebSocket client and server that enables applications to speak with Cardano nodes
+- [Ogmios](https://github.com/CardanoSolutions/ogmios) - WebSocket client and server that enables applications to speak with Cardano nodes
 - [Prefect](https://www.prefect.io/) - Workflow orchestration tool
 - [Exura](https://github.com/ExuraLabs/exura) - Cardano DeFi dashboard and analytics platform

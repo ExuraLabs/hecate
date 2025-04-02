@@ -3,4 +3,30 @@ name = "hecate"
 version = "0.1.0"
 description = "Data relay service between Ogmios and Exura"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "ogmios>=1.4.2",
+    "orjson>=3.10.16",
+    "redis>=5.2.1",
+    "uvloop>=0.21.0",
+]
+
+[dependency-groups]
+dev = [
+    "ipdb>=0.13.13",
+    "mypy>=1.15.0",
+    "pre-commit>=4.2.0",
+    "pytest-stub>=1.1.0",
+    "rich>=14.0.0",
+    "ruff>=0.11.2",
+]
+
+[tool.mypy]
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+python_version = "3.12"
+
+[[tool.mypy.overrides]]
+module = ["ogmios.*",]
+ignore_missing_imports = true
