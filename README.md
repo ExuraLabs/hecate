@@ -170,7 +170,7 @@ uv run ruff format
 
 ## License
 
-This project is licensed under the Apache 2.0 License - see the LICENSE file for details.
+This project builds on the [ogmios-python](https://gitlab.com/viperscience/ogmios-python) client, which is distributed under [GPL-3.0-or-later](https://spdx.org/licenses/GPL-3.0-or-later.html). As a result, this project is also shares the same license terms - see the LICENSE file for details.
 
 ## Acknowledgements
 
