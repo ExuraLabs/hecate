@@ -8,8 +8,8 @@ from models import BlockHash, BlockHeight, EpochData, EpochNumber, Slot
 
 def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
     """
-    Get the start and end slots of an epoch from constants if the values are known;
-    grabbed from AdaStat API otherwise.
+    Get the `EpochData` of a given epoch from constants if the values are known;
+    queries them from AdaStat API otherwise.
     Requires knowing the slot boundaries of the previous epoch AND
     the number of blocks produced in the given epoch. (Both read from CSV into client.constants)
     :param epoch:
@@ -58,3 +58,31 @@ def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
         start_hash=start_hash,
         end_hash=end_hash,
     )
+
+
+def get_epoch_blocks(epoch: EpochNumber) -> int:
+    """
+    Get the number of blocks produced in an epoch from constants if the values are known;
+    Otherwise obtained from the Koios API as the sum of blocks produced by each protocol version.
+    """
+
+    if epoch in BLOCKS_IN_EPOCH:
+        return BLOCKS_IN_EPOCH[epoch]
+
+    def parse_response(_response: Any) -> int:
+        """
+        Parse the response from the Koios API to get the number of blocks in an epoch.
+        """
+        if _response.ok:
+            data = _response.json()
+            return sum(
+                int(block["blocks"]) for block in data
+            )
+        raise Exception(
+            f"Error parsing response for epoch {epoch}: "
+            f"({_response.status_code}) - {_response.text}"
+        )
+
+    base_url = "https://api.koios.rest/api/v1/epoch_block_protocols?_epoch_no="
+    response = requests.get(f"{base_url}{epoch}")
+    return parse_response(response)
