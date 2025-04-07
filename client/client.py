@@ -7,6 +7,7 @@ from ogmios.model.ogmios_model import Jsonrpc
 from websockets import connect, ClientConnection
 
 from client.chainsync import AsyncFindIntersection, AsyncNextBlock
+from client.ledgerstate.tip import AsyncTip
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
 
 from client.ledgerstate import AsyncEraSummaries
@@ -48,9 +49,10 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
 
         # ledgerstate methods
         self.era_summaries = AsyncEraSummaries(self)
+        self.chain_tip = AsyncTip(self)
 
     # Connection management
-    async def __aenter__(self):
+    async def __aenter__(self) -> "HecateClient":
         await self.connect()
         return self
 
@@ -58,10 +60,10 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         """Close client connection when finished"""
         await self.close()
 
-    async def connect(self) -> None:
+    async def connect(self, **connection_params: Any) -> None:
         """Connect to the Ogmios server"""
         if self.connection is None:
-            self.connection = await connect(self.connect_str)
+            self.connection = await connect(self.connect_str, **connection_params)
 
     async def close(self) -> None:
         """Close the connection to the Ogmios server"""
@@ -101,7 +103,7 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
     async def epoch_blocks(self, epoch: EpochNumber, request_id: Any = None) -> list[Block]:
         """
         Get blocks produced on the given epoch.
-        Said epoch number must be greater than the last Byron epoch (207) and be finalized.
+        Epoch number must be greater than the last Byron epoch (207) and be finalized.
         This is meant to be used for historical data retrieval.
         :param epoch: The epoch to get blocks from
         :param request_id: The prefix to send in request IDs

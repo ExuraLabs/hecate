@@ -14,7 +14,7 @@ class AsyncNextBlock(AsyncOgmiosMethod[tuple[Direction, Tip, Point | Origin | Bl
 
     ogmios_class = NextBlock
     parser_method_name = "_parse_NextBlock_response"
-    batch_size: int = 1000
+    batch_size: int = 250
 
     def _create_payload(self, request_id: Any = None, **kwargs: Any) -> om.NextBlock:
         """
