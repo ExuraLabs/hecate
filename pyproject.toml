@@ -32,3 +32,7 @@ python_version = "3.12"
 [[tool.mypy.overrides]]
 module = ["ogmios.*",]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["sinks.redis.*",]
+disable_error_code = ["misc"]
