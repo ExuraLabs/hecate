@@ -70,6 +70,7 @@ Hecate consists of:
 - 🛡️ **Reorg Detection** - Catch chain reorganizations early and handle them gracefully
 - 📊 **Advanced Monitoring** - Track connection status, latency, and throughput metrics via Prefect
 - 🧰 **Flexible Deployment** - Run as a standalone service with simple configuration
+- 🔌 **Optional Dependencies** - Use only what you need - Redis is optional and can be installed separately
 
 ### Demo
 Hecate includes a demo script showcasing of some of the async client capabilities:
@@ -77,7 +78,7 @@ Hecate includes a demo script showcasing of some of the async client capabilitie
 # Run the demo (assumes Ogmios on localhost)
 uv run python -m demo
 ```
-<img src=".github/assets/demo.jpg">
+<img alt="Demo script output" src=".github/assets/demo.jpg">
 
 
 ## Installation
@@ -86,7 +87,7 @@ uv run python -m demo
 
 - Python 3.12+
 - uv (Python package manager)
-- Redis
+- Redis (Optional)
 - Ogmios node access
 
 ### Setup
@@ -98,6 +99,15 @@ cd hecate
 
 # Install dependencies
 uv venv -p 3.12
+
+# Install one of the following:
+# 1) Base installation (no Redis support)
+uv sync
+
+# 2) With development tools
+uv sync --group dev
+
+# 3) Complete installation (all features)
 uv sync --all-groups
 
 # Optional - Set up pre-commit hooks
