@@ -4,7 +4,7 @@ if TYPE_CHECKING:
     from client import HecateClient
 
 
-T = TypeVar('T')  # Return type variable for methods
+T = TypeVar("T")  # Return type variable for methods
 
 
 class AsyncOgmiosMethod(Generic[T]):

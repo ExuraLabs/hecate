@@ -52,7 +52,7 @@ class CLISink(DataSink):
         self._update_stats(blocks[-1])
 
         # Store a few blocks in history
-        for block in blocks[-self.max_history:]:
+        for block in blocks[-self.max_history :]:
             self._store_in_history(block)
 
         # Create batch summary table
@@ -65,7 +65,7 @@ class CLISink(DataSink):
         table.add_row(
             first_block.id[:8] + "...",
             last_block.id[:8] + "...",
-            f"{first_block.slot} → {last_block.slot}"
+            f"{first_block.slot} → {last_block.slot}",
         )
 
         self.console.print(table)

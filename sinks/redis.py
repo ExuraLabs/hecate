@@ -4,11 +4,10 @@ from typing import Any
 import redis.asyncio as redis
 from ogmios import Block
 
-from sinks.base import DataSink, BufferedSink
+from sinks.base import DataSink
 
 
 class RedisSink(DataSink):
-
     def __init__(
         self,
         host: str = "localhost",
@@ -28,7 +27,9 @@ class RedisSink(DataSink):
         block_data = await self._prepare_block(block)
         await self.redis.rpush(self.block_queue, json.dumps(block_data))
         await self.redis.hset(self.status_key, "last_block_hash", block_data["hash"])
-        await self.redis.hset(self.status_key, "last_block_slot", str(block_data["slot"]))
+        await self.redis.hset(
+            self.status_key, "last_block_slot", str(block_data["slot"])
+        )
 
     async def send_batch(self, blocks: list[Block]) -> None:
         """Send a batch of blocks to Redis"""

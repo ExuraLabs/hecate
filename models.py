@@ -10,6 +10,7 @@ BlockHash = NewType("BlockHash", str)
 @dataclass(frozen=True)
 class EpochData:
     """Represents key information about an epoch"""
+
     number: EpochNumber
     start_slot: Slot
     end_slot: Slot

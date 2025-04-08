@@ -100,7 +100,9 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         return resp
 
     # Higher-level methods
-    async def epoch_blocks(self, epoch: EpochNumber, request_id: Any = None) -> list[Block]:
+    async def epoch_blocks(
+        self, epoch: EpochNumber, request_id: Any = None
+    ) -> list[Block]:
         """
         Get blocks produced on the given epoch.
         Epoch number must be greater than the last Byron epoch (207) and be finalized.

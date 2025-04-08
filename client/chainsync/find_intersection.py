@@ -6,7 +6,9 @@ import ogmios.model.ogmios_model as om
 from client.base import AsyncOgmiosMethod
 
 
-class AsyncFindIntersection(AsyncOgmiosMethod[tuple[Point | Origin, Tip | Origin, Any | None]]):
+class AsyncFindIntersection(
+    AsyncOgmiosMethod[tuple[Point | Origin, Tip | Origin, Any | None]]
+):
     """
     Async wrapper for Ogmios FindIntersection method.
     Uses composition with the original FindIntersection class.
@@ -15,7 +17,9 @@ class AsyncFindIntersection(AsyncOgmiosMethod[tuple[Point | Origin, Tip | Origin
     ogmios_class = FindIntersection
     parser_method_name = "_parse_FindIntersection_response"
 
-    def _create_payload(self, request_id: Any = None, **kwargs: Any) -> om.FindIntersection:
+    def _create_payload(
+        self, request_id: Any = None, **kwargs: Any
+    ) -> om.FindIntersection:
         """Create the payload for the find_intersection request.
 
         :param request_id: The ID of the request.

@@ -10,7 +10,9 @@ class AsyncTip(AsyncOgmiosMethod[tuple[Point, Any | None]]):
     ogmios_class = QueryLedgerTip
     parser_method_name = "_parse_QueryLedgerTip_response"
 
-    def _create_payload(self, request_id: Any = None, **kwargs: Any) -> om.QueryLedgerStateTip:
+    def _create_payload(
+        self, request_id: Any = None, **kwargs: Any
+    ) -> om.QueryLedgerStateTip:
         """
         Create the payload for the QueryLedgerTip request.
         :param request_id: The ID of the request.

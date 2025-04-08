@@ -20,11 +20,12 @@ def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
 
     if (previous_epoch := EpochNumber(epoch - 1)) not in EPOCH_BOUNDARIES:
         raise ValueError(
-            f"Epoch {epoch} is not valid. "
-            f"Please check the epoch boundaries."
+            f"Epoch {epoch} is not valid. Please check the epoch boundaries."
         )
 
-    def parse_response(_response: Any, queried_height: BlockHeight) -> tuple[Slot, BlockHash]:
+    def parse_response(
+        _response: Any, queried_height: BlockHeight
+    ) -> tuple[Slot, BlockHash]:
         """
         Parse the response from the AdaStat API to get the slot and hash for the queried height.
         """
@@ -75,9 +76,7 @@ def get_epoch_blocks(epoch: EpochNumber) -> int:
         """
         if _response.ok:
             data = _response.json()
-            return sum(
-                int(block["blocks"]) for block in data
-            )
+            return sum(int(block["blocks"]) for block in data)
         raise Exception(
             f"Error parsing response for epoch {epoch}: "
             f"({_response.status_code}) - {_response.text}"

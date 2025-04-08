@@ -30,7 +30,7 @@ class DataSink(Protocol):
         ...
 
 
-T = TypeVar('T', bound=DataSink)
+T = TypeVar("T", bound=DataSink)
 
 
 class BufferedSink:

@@ -16,9 +16,7 @@ class AsyncEraSummaries(AsyncOgmiosMethod[tuple[list[om.EraSummary], Any | None]
     parser_method_name = "_parse_QueryEraSummaries_response"
 
     def _create_payload(
-            self,
-            request_id: Any = None,
-            **kwargs: Any
+        self, request_id: Any = None, **kwargs: Any
     ) -> om.QueryLedgerStateEraSummaries:
         """Create the payload for the query_era_summaries request.
 

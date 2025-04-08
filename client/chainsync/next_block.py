@@ -6,7 +6,9 @@ from ogmios import Block, Direction, NextBlock, Origin, Point, Tip
 from client.base import AsyncOgmiosMethod
 
 
-class AsyncNextBlock(AsyncOgmiosMethod[tuple[Direction, Tip, Point | Origin | Block, Any | None]]):
+class AsyncNextBlock(
+    AsyncOgmiosMethod[tuple[Direction, Tip, Point | Origin | Block, Any | None]]
+):
     """
     Async wrapper for Ogmios NextBlock method.
     Uses composition with the original NextBlock class.
