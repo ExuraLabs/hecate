@@ -77,6 +77,7 @@ Hecate includes a demo script showcasing of some of the async client capabilitie
 # Run the demo (assumes Ogmios on localhost)
 uv run python -m demo
 ```
+<img src=".github/assets/demo.jpg">
 
 
 ## Installation
