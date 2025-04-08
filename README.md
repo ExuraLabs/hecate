@@ -77,6 +77,7 @@ Hecate includes a demo script showcasing of some of the async client capabilitie
 # Run the demo (assumes Ogmios on localhost)
 uv run python -m demo
 ```
+<img src=".github/assets/demo.jpg">
 
 
 ## Installation
@@ -99,7 +100,7 @@ cd hecate
 uv venv -p 3.12
 uv sync --all-groups
 
-# Set up pre-commit hooks
+# Optional - Set up pre-commit hooks
 uv run pre-commit install
 ```
 
