@@ -159,7 +159,6 @@ source = { virtual = "." }
 dependencies = [
     { name = "ogmios" },
     { name = "orjson" },
-    { name = "redis" },
     { name = "requests" },
     { name = "uvloop" },
 ]
@@ -174,12 +173,14 @@ dev = [
     { name = "ruff" },
     { name = "types-requests" },
 ]
+redis = [
+    { name = "redis" },
+]
 
 [package.metadata]
 requires-dist = [
     { name = "ogmios", specifier = ">=1.4.2" },
     { name = "orjson", specifier = ">=3.10.16" },
-    { name = "redis", specifier = ">=5.2.1" },
     { name = "requests", specifier = ">=2.32.3" },
     { name = "uvloop", specifier = ">=0.21.0" },
 ]
@@ -194,6 +195,7 @@ dev = [
     { name = "ruff", specifier = ">=0.11.2" },
     { name = "types-requests", specifier = ">=2.32.0.20250328" },
 ]
+redis = [{ name = "redis", specifier = ">=5.2.1" }]
 
 [[package]]
 name = "humanfriendly"

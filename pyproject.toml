@@ -6,7 +6,6 @@ requires-python = ">=3.12"
 dependencies = [
     "ogmios>=1.4.2",
     "orjson>=3.10.16",
-    "redis>=5.2.1",
     "requests>=2.32.3",
     "uvloop>=0.21.0",
 ]
@@ -20,6 +19,9 @@ dev = [
     "rich>=14.0.0",
     "ruff>=0.11.2",
     "types-requests>=2.32.0.20250328",
+]
+redis = [
+    "redis>=5.2.1",
 ]
 
 [tool.mypy]
