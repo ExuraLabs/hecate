@@ -1,0 +1,38 @@
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+
+default_language_version:
+    python: python3.12
+
+fail_fast: true
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: Ruff check
+        entry: uv
+        args: [run, ruff, check, .]
+        language: system
+        types: [python]
+
+      - id: ruff-format
+        name: Ruff format (auto-fix)
+        entry: uv
+        args: [run, ruff, format, .]
+        language: system
+        types: [python]
+
+      - id: mypy
+        name: MyPy Type checking
+        entry: uv
+        args: [run, mypy]
+        language: system
+        types: [python]

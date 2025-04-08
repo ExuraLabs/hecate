@@ -107,6 +107,6 @@ class CLISink(DataSink):
             "slot": block.slot,
             "height": block.height,
             "era": block.era,
-            "issuer": block.issuer,
+            "issuer": block.issuer["verificationKey"],
             "tx_count": len(block.transactions),
         }
