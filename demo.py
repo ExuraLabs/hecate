@@ -17,7 +17,7 @@ async def run_demo() -> None:
 
     # Initialize client
     console.print("[bold blue]Connecting to Ogmios...[/]")
-    client = HecateClient(host="argon")
+    client = HecateClient()
     await client.connect()
 
     try:
