@@ -99,7 +99,7 @@ cd hecate
 uv venv -p 3.12
 uv sync --all-groups
 
-# Set up pre-commit hooks
+# Optional - Set up pre-commit hooks
 uv run pre-commit install
 ```
 
