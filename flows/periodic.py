@@ -1,11 +1,13 @@
 from typing import Any
 
 import requests
+from prefect import task, flow
 
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
 from models import BlockHash, BlockHeight, EpochData, EpochNumber, Slot
 
 
+@task
 def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
     """
     Get the `EpochData` of a given epoch from constants if the values are known;
@@ -61,6 +63,7 @@ def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
     )
 
 
+@task
 def get_epoch_blocks(epoch: EpochNumber) -> int:
     """
     Get the number of blocks produced in an epoch from constants if the values are known;
@@ -85,3 +88,24 @@ def get_epoch_blocks(epoch: EpochNumber) -> int:
     base_url = "https://api.koios.rest/api/v1/epoch_block_protocols?_epoch_no="
     response = requests.get(f"{base_url}{epoch}")
     return parse_response(response)
+
+
+@flow(name="Fetch Epoch Data")
+def fetch_epoch_data_flow(epoch: EpochNumber) -> tuple[EpochData, int]:
+    """Flow that fetches all data for a specific epoch"""
+    boundaries = get_epoch_boundaries(epoch)
+    block_count = get_epoch_blocks(epoch)
+    return boundaries, block_count
+
+
+if __name__ == "__main__":
+    # Deploy with daily schedule (midnight UTC)
+    fetch_epoch_data_flow.from_source(  # type: ignore
+        source="https://github.com/exuralabs/hecate.git@create_prefect_flows",
+        entrypoint="flows/periodic.py:fetch_epoch_data_flow",
+    ).deploy(
+        name="daily-epoch-data-fetch",
+        work_pool_name="exura-work-pool",
+        cron="0 0 * * *",  # Run daily at midnight
+        parameters={"epoch": 549},  # Starting epoch - cast to EpochNumber in the flow
+    )

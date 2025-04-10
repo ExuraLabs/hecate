@@ -23,6 +23,9 @@ dev = [
 redis = [
     "redis>=5.2.1",
 ]
+prefect = [
+    "prefect>=3.3.3",
+]
 
 [tool.mypy]
 strict = true
