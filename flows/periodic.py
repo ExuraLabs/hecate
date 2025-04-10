@@ -2,6 +2,7 @@ from typing import Any
 
 import requests
 from prefect import task, flow
+from prefect.runner.storage import GitRepository
 
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
 from models import BlockHash, BlockHeight, EpochData, EpochNumber, Slot
@@ -99,10 +100,15 @@ def fetch_epoch_data_flow(epoch: EpochNumber) -> tuple[EpochData, int]:
 
 
 if __name__ == "__main__":
+    git_repo = GitRepository(
+        url="https://github.com/exuralabs/hecate.git",
+        branch="create_prefect_flows",
+    )
+
     # Deploy with daily schedule (midnight UTC)
     fetch_epoch_data_flow.from_source(  # type: ignore
-        source="https://github.com/exuralabs/hecate.git@create_prefect_flows",
-        entrypoint="flows/periodic.py:fetch_epoch_data_flow",
+        git_repo,
+        entrypoint="flows.periodic:fetch_epoch_data_flow",
     ).deploy(
         name="daily-epoch-data-fetch",
         work_pool_name="exura-work-pool",

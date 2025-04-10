@@ -1,3 +1,11 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["client", "flows", "sinks"]
+
+
 [project]
 name = "hecate"
 version = "0.1.0"
