@@ -12,7 +12,7 @@ pull:
 
   - prefect.deployments.steps.run_shell_script:
       id: uv_sync
-      directory: hecate
+      directory: hecate-create_prefect_flows  # Should just be hecate
       script: |
         uv sync --no-dev --group prefect --no-group redis
 

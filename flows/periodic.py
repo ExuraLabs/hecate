@@ -17,7 +17,7 @@ from models import BlockHash, BlockHeight, EpochData, EpochNumber, Slot
 @task
 def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
     """
-    Get the `EpochData` of a given epoch from constants if the values are known;
+    Gets the `EpochData` of a given epoch from constants if the values are known;
     queries them from AdaStat API otherwise.
     Requires knowing the slot boundaries of the previous epoch AND
     the number of blocks produced in the given epoch. (Both read from CSV into client.constants)
@@ -51,7 +51,7 @@ def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
     base_url = "https://adastat.net/api/rest/v1/search.json?query="
     previous_boundaries = EPOCH_BOUNDARIES[previous_epoch]
 
-    start_height = BlockHeight(previous_boundaries.end_slot + 1)
+    start_height = BlockHeight(previous_boundaries.end_height + 1)
     response = requests.get(f"{base_url}{start_height}")
     start_slot, start_hash = parse_response(response, start_height)
 
