@@ -1,8 +1,14 @@
+import csv
+import logging
+import os
+import subprocess
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
+import json
 import requests
 from prefect import task, flow
-from prefect.runner.storage import GitRepository
 
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
 from models import BlockHash, BlockHeight, EpochData, EpochNumber, Slot
@@ -91,27 +97,123 @@ def get_epoch_blocks(epoch: EpochNumber) -> int:
     return parse_response(response)
 
 
-@flow(name="Fetch Epoch Data")
-def fetch_epoch_data_flow(epoch: EpochNumber) -> tuple[EpochData, int]:
-    """Flow that fetches all data for a specific epoch"""
+def get_current_epoch() -> EpochNumber:
+    """
+    Get the current epoch from the Koios API.
+    """
+
+    def parse_response(_response: Any) -> EpochNumber:
+        """
+        Parse the response from the Koios API to get the current epoch.
+        """
+        if _response.ok:
+            data = _response.json()
+            return EpochNumber(data[0]["epoch_no"])
+        raise Exception(
+            f"Error parsing response for current epoch: "
+            f"({_response.status_code}) - {_response.text}"
+        )
+
+    base_url = "https://api.koios.rest/api/v1/tip"
+    response = requests.get(base_url)
+    return parse_response(response)
+
+
+def get_system_epoch() -> EpochNumber:
+    """
+    Get the last processed epoch from the checkpoint file.
+    """
+    with open(Path(__file__).parent / "checkpoint.json", "r") as file:
+        checkpoint = json.loads(file.read())
+        return EpochNumber(checkpoint["epoch"])
+
+
+def update_checkpoint(epoch: EpochNumber) -> None:
+    """
+    Updates the epoch data and checkpoint files with the latest processed epoch.
+    """
+    logging.info(f"Fetching data for epoch {epoch}...")
+    checkpoint = {"epoch": epoch}
     boundaries = get_epoch_boundaries(epoch)
     block_count = get_epoch_blocks(epoch)
-    return boundaries, block_count
+    data_dir = Path(__file__).parent.parent / "data"
+
+    with open(data_dir / "epoch_boundaries.csv", "a") as boundaries_file:
+        epoch_data = asdict(boundaries)
+        dict_writer = csv.DictWriter(boundaries_file, fieldnames=epoch_data)
+        dict_writer.writerow(epoch_data)
+
+    with open(data_dir / "epoch_blocks.csv", "a") as blocks_file:
+        writer = csv.writer(blocks_file)
+        writer.writerow([epoch, block_count])
+
+    with open(Path(__file__).parent / "checkpoint.json", "w") as checkpoint_file:
+        checkpoint_file.write(json.dumps(checkpoint, indent=2))
+    logging.info(f"Checkpoint updated to epoch {epoch}.")
 
 
-if __name__ == "__main__":
-    git_repo = GitRepository(
-        url="https://github.com/exuralabs/hecate.git",
-        branch="create_prefect_flows",
+@task
+def commit_and_push_changes(epoch: EpochNumber) -> None:
+    """
+    Stage any changes to flows/checkpoint.json and data/,
+    commit them if there’s anything new, and push to
+    the automated/epoch-updates branch on GitHub.
+    This function uses the GitHub token from the GITHUB_TOKEN environment variable.
+    """
+    _BASE_DIR = Path(__file__).parent.parent
+    _GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+    if not _GITHUB_TOKEN:
+        raise ValueError("GITHUB_TOKEN environment variable is not set.")
+
+    # Stage files
+    subprocess.run(
+        ["git", "add", "flows/checkpoint.json", "data"],
+        cwd=_BASE_DIR,
+        check=True,
     )
 
-    # Deploy with daily schedule (midnight UTC)
-    fetch_epoch_data_flow.from_source(  # type: ignore
-        git_repo,
-        entrypoint="flows.periodic:fetch_epoch_data_flow",
-    ).deploy(
-        name="daily-epoch-data-fetch",
-        work_pool_name="exura-work-pool",
-        cron="0 0 * * *",  # Run daily at midnight
-        parameters={"epoch": 549},  # Starting epoch - cast to EpochNumber in the flow
+    # If nothing to commit, exit
+    if subprocess.call(["git", "diff", "--cached", "--quiet"], cwd=_BASE_DIR) == 0:
+        logging.info("No new changes to commit.")
+        return
+
+    commit_msg = f"Automated epoch data update for epoch {epoch}"
+    subprocess.run(["git", "commit", "-m", commit_msg], cwd=_BASE_DIR, check=True)
+
+    # Push back to GitHub over HTTPS (token in-line)
+    remote_url = (
+        f"https://x-access-token:{_GITHUB_TOKEN}@github.com/ExuraLabs/hecate.git"
     )
+    subprocess.run(
+        ["git", "push", remote_url, "HEAD:automated/epoch-updates"],
+        cwd=_BASE_DIR,
+        check=True,
+    )
+    logging.info("Changes pushed to automated/epoch-updates.")
+
+
+@flow(name="Fetch Epoch Data")
+def fetch_epoch_data_flow() -> EpochNumber | None:
+    """
+    Fetches, processes, and updates the system's epoch data. This flow determines the
+    next epoch number based on the system's current checkpoint and updates it if necessary.
+    If the current checkpoint is found to already be up to date with the current epoch,
+    no actions are performed. Otherwise, the new checkpoint is committed and pushed.
+
+    :return: The updated upcoming epoch number if changes were made, otherwise None.
+    :rtype: EpochNumber | None
+    """
+
+    checkpoint = get_system_epoch()
+    current_epoch = get_current_epoch()
+    upcoming = EpochNumber(checkpoint + 1)
+
+    if upcoming == current_epoch:
+        logging.info(
+            f"Checkpoint epoch {checkpoint} is already up-to-date; nothing to do."
+        )
+        return None
+
+    update_checkpoint(upcoming)
+    commit_and_push_changes(upcoming)
+    return upcoming
