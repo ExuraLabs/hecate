@@ -32,6 +32,12 @@ def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
             f"Epoch {epoch} is not valid. Please check the epoch boundaries."
         )
 
+    if epoch not in BLOCKS_IN_EPOCH:
+        raise ValueError(
+            f"Produced blocks for Epoch {epoch} is not available."
+            "Make sure get_epoch_blocks() has been called first."
+        )
+
     def parse_response(
         _response: Any, queried_height: BlockHeight
     ) -> tuple[Slot, BlockHash]:
@@ -59,7 +65,7 @@ def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
     response = requests.get(f"{base_url}{end_height}")
     end_slot, end_hash = parse_response(response, end_height)
 
-    return EpochData(
+    result = EpochData(
         number=epoch,
         start_slot=start_slot,
         end_slot=end_slot,
@@ -68,6 +74,8 @@ def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
         start_hash=start_hash,
         end_hash=end_hash,
     )
+    EPOCH_BOUNDARIES[epoch] = result
+    return result
 
 
 @task
@@ -75,6 +83,7 @@ def get_epoch_blocks(epoch: EpochNumber) -> int:
     """
     Get the number of blocks produced in an epoch from constants if the values are known;
     Otherwise obtained from the Koios API as the sum of blocks produced by each protocol version.
+    If the value is obtained from the Koios API, it is cached in the constants for future use.
     """
 
     if epoch in BLOCKS_IN_EPOCH:
@@ -94,7 +103,9 @@ def get_epoch_blocks(epoch: EpochNumber) -> int:
 
     base_url = "https://api.koios.rest/api/v1/epoch_block_protocols?_epoch_no="
     response = requests.get(f"{base_url}{epoch}")
-    return parse_response(response)
+    result = parse_response(response)
+    BLOCKS_IN_EPOCH[epoch] = result
+    return result
 
 
 def get_current_epoch() -> EpochNumber:
@@ -134,13 +145,22 @@ def update_checkpoint(epoch: EpochNumber) -> None:
     """
     logging.info(f"Fetching data for epoch {epoch}...")
     checkpoint = {"epoch": epoch}
-    boundaries = get_epoch_boundaries(epoch)
     block_count = get_epoch_blocks(epoch)
+    boundaries = get_epoch_boundaries(epoch)
     data_dir = Path(__file__).parent.parent / "data"
 
     with open(data_dir / "epoch_boundaries.csv", "a") as boundaries_file:
         epoch_data = asdict(boundaries)
-        dict_writer = csv.DictWriter(boundaries_file, fieldnames=epoch_data)
+        fields = [
+            "number",
+            "start_height",
+            "start_slot",
+            "start_hash",
+            "end_height",
+            "end_slot",
+            "end_hash",
+        ]
+        dict_writer = csv.DictWriter(boundaries_file, fieldnames=fields)
         dict_writer.writerow(epoch_data)
 
     with open(data_dir / "epoch_blocks.csv", "a") as blocks_file:
@@ -213,6 +233,8 @@ def fetch_epoch_data_flow() -> EpochNumber | None:
             f"Checkpoint epoch {checkpoint} is already up-to-date; nothing to do."
         )
         return None
+
+    logging.info(f"Current epoch is {current_epoch}")
 
     update_checkpoint(upcoming)
     commit_and_push_changes(upcoming)
