@@ -8,11 +8,10 @@ push:
 pull:
   - prefect.deployments.steps.git_clone:
       repository: https://github.com/ExuraLabs/hecate.git
-      branch: create_prefect_flows
 
   - prefect.deployments.steps.run_shell_script:
       id: uv_sync
-      directory: hecate-create_prefect_flows  # Should just be hecate
+      directory: hecate
       script: |
         uv sync --no-dev --group prefect --no-group redis
 
