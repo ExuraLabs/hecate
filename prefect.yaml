@@ -1,0 +1,41 @@
+name: hecate
+prefect-version: 3.3.3
+
+build:
+
+push:
+
+pull:
+  - prefect.deployments.steps.git_clone:
+      repository: https://github.com/ExuraLabs/hecate.git
+
+  - prefect.deployments.steps.run_shell_script:
+      id: uv_sync
+      directory: hecate
+      script: |
+        uv sync --no-dev --group prefect --no-group redis
+
+deployments:
+  - name: epoch-automation
+    version:
+    tags: [ ]
+    concurrency_limit:
+    description: Flow that fetches all data for a specific epoch
+    entrypoint: flows/periodic.py:fetch_epoch_data_flow
+    parameters: { }
+    work_pool:
+      name: exura-work-pool
+      work_queue_name:
+      job_variables:
+        env:
+          # Inject bot identity and token for the commit task
+          GITHUB_TOKEN: "{{ prefect.blocks.secret.github-token }}"
+          GIT_AUTHOR_NAME: "Prefect Bot"
+          GIT_AUTHOR_EMAIL: "bot@exura.org"
+          GIT_COMMITTER_NAME: "Prefect Bot"
+          GIT_COMMITTER_EMAIL: "bot@exura.org"
+    schedules:
+      - cron: 0 0 * * *
+        timezone: UTC
+        day_or: true
+        active: true

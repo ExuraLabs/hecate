@@ -6,7 +6,9 @@ requires-python = ">=3.12"
 dependencies = [
     "ogmios>=1.4.2",
     "orjson>=3.10.16",
+    "prefect-github>=0.3.1",
     "requests>=2.32.3",
+    "rich>=14.0.0",
     "uvloop>=0.21.0",
 ]
 
@@ -16,12 +18,14 @@ dev = [
     "mypy>=1.15.0",
     "pre-commit>=4.2.0",
     "pytest-stub>=1.1.0",
-    "rich>=14.0.0",
     "ruff>=0.11.2",
     "types-requests>=2.32.0.20250328",
 ]
 redis = [
     "redis>=5.2.1",
+]
+prefect = [
+    "prefect[github]>=3.3.3",
 ]
 
 [tool.mypy]
