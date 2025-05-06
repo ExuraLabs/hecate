@@ -205,7 +205,7 @@ def commit_and_push_changes(epoch: EpochNumber) -> None:
         f"https://x-access-token:{_GITHUB_TOKEN}@github.com/ExuraLabs/hecate.git"
     )
     subprocess.run(
-        ["git", "push", remote_url, "HEAD:automated/epoch-updates"],
+        ["git", "push", "--force", remote_url, "HEAD:automated/epoch-updates"],
         cwd=_BASE_DIR,
         check=True,
     )
