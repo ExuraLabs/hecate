@@ -1,8 +1,9 @@
 # Hecate 🔮 <img align="right" width="200" height="200" src=".github/assets/hecate_logo.png">
 
-[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
+[![Current Epoch](https://img.shields.io/badge/dynamic/json?logo=cardano&url=https://raw.githubusercontent.com/ExuraLabs/hecate/master/flows/checkpoint.json&query=$.epoch&label=Epoch&color=blue)](https://github.com/ExuraLabs/hecate/actions/workflows/auto-pr-epoch-updates.yml)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg?logo=python)](https://www.python.org/downloads/release/python-3120/)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
-[![Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+[![Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg?logo=ruff)](https://github.com/astral-sh/ruff)
 [![Mypy](https://img.shields.io/badge/types-mypy-blue.svg)](http://mypy-lang.org/)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit)](https://github.com/pre-commit/pre-commit)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL3-blue.svg)](https://spdx.org/licenses/GPL-3.0-or-later.html)
