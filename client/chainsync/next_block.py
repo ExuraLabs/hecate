@@ -18,6 +18,22 @@ class AsyncNextBlock(
     parser_method_name = "_parse_NextBlock_response"
     batch_size: int = 250
 
+    def __init__(
+        self,
+        client: Any,
+    ) -> None:
+        """
+        Initialize the AsyncNextBlock class.
+        :param client: The client to use for sending requests.
+        :param method: The method name to use for the request.
+        :param request_id: The ID of the request.
+        """
+        from ogmios.model.cardano_model import Era2
+
+        # Patch the Era2 class to handle the missing "conway" era
+        Era2._missing_ = classmethod(lambda _cls, _value: _cls.babbage)
+        super().__init__(client)
+
     def _create_payload(self, request_id: Any = None, **kwargs: Any) -> om.NextBlock:
         """
         Create the payload for the next_block request.
