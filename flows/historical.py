@@ -15,7 +15,7 @@ from flows import get_system_checkpoint
 from models import EpochNumber
 
 
-@task(cache_policy=NO_CACHE)
+@task(retries=3, retry_delay_seconds=30, cache_policy=NO_CACHE)
 async def sync_epoch(
     epoch: EpochNumber,
     batch_size: int,

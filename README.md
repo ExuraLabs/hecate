@@ -81,6 +81,14 @@ uv run python -m demo
 ```
 <img alt="Demo script output" src=".github/assets/demo.jpg">
 
+## Prefect Flows 🔄
+
+Hecate uses [Prefect](https://www.prefect.io/) to orchestrate both historical and real-time data
+flows:
+
+- **Historical Sync**: Efficiently backfill all on-chain history in a resumable, concurrent manner
+- **Periodic Tasks**: Automatically update epoch metadata and other system constants
+- **[See detailed flows documentation](flows/README.md)**
 
 ## Installation
 
@@ -110,9 +118,6 @@ uv sync --group dev
 
 # 3) Complete installation (all features)
 uv sync --all-groups
-
-# Optional - Set up pre-commit hooks
-uv run pre-commit install
 ```
 
 ## Project Structure
@@ -146,6 +151,9 @@ uv run ruff check
 
 # Run ruff for formatting
 uv run ruff format
+
+# Set up pre-commit hooks
+uv run pre-commit install
 ```
 
 

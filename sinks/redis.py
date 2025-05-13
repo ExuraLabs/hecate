@@ -187,7 +187,7 @@ class HistoricalRedisSink(DataSink):
         self.redis = aioredis.from_url(url, decode_responses=True)
         # load our Lua once
         self._advance_sha = await self.redis.script_load(_ADVANCE_EPOCH_LUA)
-        self.logger.info("✅ Connected to Redis and loaded Lua advance script")
+        self.logger.debug("✅ Connected to Redis and loaded Lua advance script")
         # ensure last_synced_epoch exists
         await self.redis.setnx(self.last_synced_epoch, self.start_epoch)
         return self
@@ -195,7 +195,7 @@ class HistoricalRedisSink(DataSink):
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         if self.redis:
             await self.redis.close()
-            self.logger.info("🛑 Redis connection closed")
+            self.logger.debug("🛑 Redis connection closed")
 
     async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:
         assert self.redis, "Not initialized"
