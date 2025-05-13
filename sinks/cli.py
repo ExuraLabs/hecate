@@ -40,7 +40,7 @@ class CLISink(DataSink):
             )
         )
 
-    async def send_batch(self, blocks: list[Block]) -> None:
+    async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:
         """Print a summary of the batch to the console"""
         if not blocks:
             return

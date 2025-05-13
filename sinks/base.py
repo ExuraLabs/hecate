@@ -17,7 +17,7 @@ class DataSink(Protocol):
         """Send a block to the sink"""
         ...
 
-    async def send_batch(self, blocks: list[Block]) -> None:
+    async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:
         """Send a batch of blocks to the sink"""
         ...
 
