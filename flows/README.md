@@ -1,22 +1,3 @@
-# Flow Documentation
-
-## Update for main README.md
-
-```markdown
-## Prefect Flows 🔄
-
-Hecate uses [Prefect](https://www.prefect.io/) to orchestrate both historical and real-time data
-flows:
-
-- **Historical Sync**: Efficiently backfill blockchain history in a resumable, concurrent manner
-- **Periodic Tasks**: Automatically update epoch metadata and other system constants
-- **[See detailed flows documentation](flows/README.md)**
-
-```
-
-## flows/README.md
-
-```markdown
 # Hecate Flows
 
 Hecate uses [Prefect](https://www.prefect.io/) to orchestrate data flows and periodic tasks. This
