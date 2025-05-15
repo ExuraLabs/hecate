@@ -9,10 +9,9 @@ import orjson as json
 from websockets import connect, ClientConnection
 
 from client.chainsync import AsyncFindIntersection, AsyncNextBlock
-from client.ledgerstate.tip import AsyncTip
+from client.ledgerstate import AsyncEpoch, AsyncEraSummaries, AsyncTip
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
 
-from client.ledgerstate import AsyncEraSummaries
 from models import EpochNumber
 
 
@@ -55,6 +54,7 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         # ledgerstate methods
         self.era_summaries = AsyncEraSummaries(self)
         self.chain_tip = AsyncTip(self)
+        self.epoch = AsyncEpoch(self)
 
     # Connection management
     async def __aenter__(self) -> "HecateClient":
