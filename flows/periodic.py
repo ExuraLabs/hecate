@@ -94,14 +94,14 @@ def get_epoch_blocks(epoch: EpochNumber) -> int:
         Parse the response from the Koios API to get the number of blocks in an epoch.
         """
         if _response.ok:
-            data = _response.json()
-            return sum(int(block["blocks"]) for block in data)
+            [data] = _response.json()
+            return int(data["blk_count"])
         raise Exception(
             f"Error parsing response for epoch {epoch}: "
             f"({_response.status_code}) - {_response.text}"
         )
 
-    base_url = "https://api.koios.rest/api/v1/epoch_block_protocols?_epoch_no="
+    base_url = "https://api.koios.rest/api/v1/epoch_info?_epoch_no="
     response = requests.get(f"{base_url}{epoch}")
     result = parse_response(response)
     BLOCKS_IN_EPOCH[epoch] = result
