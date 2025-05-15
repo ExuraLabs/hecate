@@ -13,7 +13,7 @@ pull:
       id: uv_sync
       directory: hecate
       script: |
-        uv sync --no-dev --group prefect --no-group redis
+        uv sync --no-dev --group prefect --group redis
 
 deployments:
   - name: epoch-automation
@@ -25,17 +25,31 @@ deployments:
     parameters: { }
     work_pool:
       name: exura-work-pool
-      work_queue_name:
+      work_queue_name: periodic
       job_variables:
         env:
-          # Inject bot identity and token for the commit task
           GITHUB_TOKEN: "{{ prefect.blocks.secret.github-token }}"
           GIT_AUTHOR_NAME: "Prefect Bot"
           GIT_AUTHOR_EMAIL: "bot@exura.org"
           GIT_COMMITTER_NAME: "Prefect Bot"
           GIT_COMMITTER_EMAIL: "bot@exura.org"
-    schedules:
+    schedule:
       - cron: 0 0 * * *
         timezone: UTC
         day_or: true
         active: true
+
+  - name: historical-sync
+    description: Flow that retrieves and relays data across a range of epochs
+    entrypoint: flows/historical.py:historical_sync_flow
+    work_pool:
+      name: exura-work-pool
+      work_queue_name: historical
+      job_variables:
+        env:
+          REDIS_URL: "{{ prefect.variables.redis_url }}"
+          OGMIOS_HOST: "{{ prefect.variables.ogmios_host }}"
+    version:
+    tags: [ ]
+    concurrency_limit:
+    parameters: { }
