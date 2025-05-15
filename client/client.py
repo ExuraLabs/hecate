@@ -156,9 +156,10 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         :param epoch: The epoch to get blocks from
         :param request_id: The prefix to send in request IDs
         """
-        epoch_boundaries = EPOCH_BOUNDARIES[epoch]
+        # Intersect the end of the previous epoch so we can start streaming the expected one
+        previous_epoch = EPOCH_BOUNDARIES[EpochNumber(epoch - 1)]
         intersection_point = Point(
-            slot=epoch_boundaries.start_slot, id=epoch_boundaries.start_hash
+            slot=previous_epoch.end_slot, id=previous_epoch.end_hash
         )
         intersection, tip, request_id = await self.find_intersection.execute(
             points=[intersection_point],
