@@ -5,9 +5,7 @@ description = "Data relay service between Ogmios and Exura"
 requires-python = ">=3.12"
 dependencies = [
     "ogmios>=1.4.2",
-    "orjson>=3.10.16",
-    "prefect-github>=0.3.1",
-    "prefect[dask,github]>=3.3.3",
+    "orjson>=3.10.18",
     "requests>=2.32.3",
     "rich>=14.0.0",
     "uvloop>=0.21.0",
@@ -19,14 +17,15 @@ dev = [
     "mypy>=1.15.0",
     "pre-commit>=4.2.0",
     "pytest-stub>=1.1.0",
-    "ruff>=0.11.2",
+    "ruff>=0.11.9",
     "types-requests>=2.32.0.20250328",
 ]
 redis = [
     "redis>=5.2.1",
 ]
 prefect = [
-    "prefect[github]>=3.3.3",
+    "prefect[dask,github]>=3.3.3",
+    "bokeh>=3.1.0", # for Dask Dashboard UI
 ]
 
 [tool.mypy]
