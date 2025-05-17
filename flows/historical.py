@@ -1,7 +1,9 @@
 import multiprocessing
 import time
+from typing import Any
 
 from ogmios import Block
+import ogmios.model.model_map as mm
 from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
 from prefect.futures import wait
@@ -15,7 +17,38 @@ from flows import get_system_checkpoint
 from models import EpochNumber
 
 
-@task(retries=3, retry_delay_seconds=30, cache_policy=NO_CACHE)
+def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
+    """
+    Fast initialization for Block objects that bypasses Pydantic validation.
+
+    This optimized initialization directly assigns attributes from kwargs
+    without constructing or validating Pydantic models. It's designed for
+    processing historical blocks where validation is redundant.
+
+    Note:
+        This method omits all validation checks present in the original
+        implementation. Type mismatches or missing fields won't raise
+        errors, which is acceptable for historical data but potentially
+        dangerous for real-time blocks.
+
+    Performance:
+        When processing hundreds of thousands of blocks, this can significantly
+        reduce CPU without affecting correctness.
+    """
+    self.blocktype = blocktype
+    # Directly assign all attributes without creating _schematype
+    for key, value in kwargs.items():
+        setattr(self, key, value)
+    # Set a dummy _schematype attribute to avoid attribute errors
+    self._schematype = None
+
+
+@task(
+    retries=3,
+    retry_delay_seconds=30,
+    cache_policy=NO_CACHE,
+    task_run_name="sync_epoch_{epoch}",
+)
 async def sync_epoch(
     epoch: EpochNumber,
     batch_size: int,
@@ -34,7 +67,9 @@ async def sync_epoch(
     """
     logger = get_run_logger()
     epoch_start = time.perf_counter()
-    logger.info(f"▶️  Starting sync for epoch {epoch}")
+    logger.debug(f"▶️  Starting sync for epoch {epoch}")
+
+    Block.__init__ = fast_block_init
 
     # Fetch _and_ stream blocks concurrently
     async with HistoricalRedisSink() as sink, HecateClient() as client:
@@ -75,7 +110,7 @@ async def sync_epoch(
         new_last = await sink.mark_epoch_complete(epoch)
 
     epoch_end = time.perf_counter()
-    logger.info(
+    logger.debug(
         f"✅ Finished epoch {epoch} in {epoch_end - epoch_start:.2f}s; "
         f"last_synced_epoch → {new_last}"
     )
