@@ -9,7 +9,8 @@ from models import Slot
 class DataSink(Protocol):
     """Protocol defining the interface for any data sink used by Hecate"""
 
-    async def _prepare_block(self, block: Block) -> dict[str, Any]:
+    @classmethod
+    async def _prepare_block(cls, block: Block) -> dict[str, Any]:
         """Prepare a block for sending to the sink"""
         ...
 

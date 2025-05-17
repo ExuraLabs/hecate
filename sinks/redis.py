@@ -68,7 +68,8 @@ class RedisSink(DataSink):
     async def close(self) -> None:
         await self.redis.close()
 
-    async def _prepare_block(self, block: Block) -> dict[str, Any]:
+    @classmethod
+    async def _prepare_block(cls, block: Block) -> dict[str, Any]:
         """
         Prepare a block for sending to Redis.
         This method sends over the entire content of the block in dictionary format,
@@ -277,7 +278,8 @@ class HistoricalRedisSink(DataSink):
     async def close(self) -> None:
         await self.__aexit__(None, None, None)
 
-    async def _prepare_block(self, block: Block) -> dict[str, Any]:
+    @classmethod
+    async def _prepare_block(cls, block: Block) -> dict[str, Any]:
         """
         Prepare a block for Redis storage by converting it to a dictionary format.
 
@@ -291,7 +293,7 @@ class HistoricalRedisSink(DataSink):
         Returns:
             dict: A dictionary representation of the block ready for serialization
         """
-        return await RedisSink()._prepare_block(block)
+        return await RedisSink._prepare_block(block)
 
     async def send_block(self, block: Block) -> None:
         """This method is not used in this class, as we only send batches of blocks instead."""

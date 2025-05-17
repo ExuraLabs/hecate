@@ -100,7 +100,8 @@ class CLISink(DataSink):
         if len(self.last_blocks) > self.max_history:
             self.last_blocks.pop(0)
 
-    async def _prepare_block(self, block: Block) -> dict[str, Any]:
+    @classmethod
+    async def _prepare_block(cls, block: Block) -> dict[str, Any]:
         """Prepare a block for sending to the sink"""
         return {
             "hash": block.id,
