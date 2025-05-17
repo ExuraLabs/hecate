@@ -1,4 +1,3 @@
-import logging
 import os
 from typing import Any, AsyncIterator
 
@@ -153,6 +152,7 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         Epoch number must be greater than the last Byron epoch (207) and be finalized.
         This is meant to be used for historical data retrieval.
         Yield sub-batches as soon as they arrive, pipelining up to next_block.batch_size requests.
+        The blocks are guaranteed to be unique and sorted by height in ascending order.
         :param epoch: The epoch to get blocks from
         :param request_id: The prefix to send in request IDs
         """
@@ -167,21 +167,32 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         )
         if intersection != intersection_point:
             raise ValueError(
-                f"Couldn't interesect the start of epoch {epoch}, got: {intersection}"
+                f"Couldn't intersect the start of epoch {epoch}, got: {intersection}"
             )
 
-        # Once we have the intersection, we can start requesting blocks in batches
-        expected_blocks = BLOCKS_IN_EPOCH[epoch]
-        remaining_blocks = expected_blocks
-        # But first! We need to set the logger level to ERROR
-        # to supress pydantic's spurious warnings about schema validation
-        ogmios_logger = logging.getLogger("ogmios")
-        ogmios_logger.setLevel(logging.ERROR)
-
+        # If we got here, the epoch blocks are available, so we can start fetching them
+        remaining_blocks = BLOCKS_IN_EPOCH[epoch]
+        expected_height = None
+        last_height = None
         while remaining_blocks > 0:
             batch = await self.next_block.batched(
                 # Avoid unnecessary requests
                 batch_size=min(remaining_blocks, self.next_block.batch_size)
             )
+
+            # Filter out duplicates. Since uniqueness is guaranteed within batches,
+            # we can just check the last block of the previous batch against the first
+            # of the current and remove it if it has the same height.
+            if expected_height and batch[0].height == last_height:
+                batch.pop(0)
+
+            assert batch, (
+                f"Received empty batch, expected {remaining_blocks} more blocks"
+            )
+
+            # Update the expected height for the next batch
+            last_height = batch[-1].height
+            expected_height = last_height + 1
+
             remaining_blocks -= len(batch)
             yield batch
