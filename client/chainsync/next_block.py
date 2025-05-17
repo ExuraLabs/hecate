@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 import ogmios.model.ogmios_model as om
@@ -50,25 +51,34 @@ class AsyncNextBlock(
         """
         Get the next blocks from the server. Assumes the cursor is at the desired intersection.
         This method sends a batch of requests and receives `batch_size` blocks. Not intended for
-        reaching the tip, but rather for retrieving historical blocks.
+        reaching the tip, but rather for retrieving historical blocks. The returned blocks are
+        guaranteed to be sorted by height in ascending order.
+
+        Note: Any received duplicates or non-blocks (i.e.: Points) are filtered out, so
+        the returned list may be shorter than `batch_size`.
+
         :param batch_size: Number of blocks to retrieve (defaults to self.batch_size)
-        :return: A list of Block objects.
+        :return: A list of unique Block objects sorted by height in ascending order.
         """
         blocks = []
         if batch_size is None:
             batch_size = self.batch_size
+
+        # Send all requests first
         for _ in range(batch_size):
             await self.send()
-        received_point_first = False
+
+        # Collect all received blocks
+        seen = set()
         for _ in range(batch_size):
-            _, _, received, _ = await self.receive()
-            if not isinstance(received, Block):
-                # If received isn't a Block, means we have just started traversing the chain
-                # In this case, flag that we have to make an extra request to reach batch_size.
-                received_point_first = True
+            _, _, received, _ = await asyncio.wait_for(self.receive(), timeout=30.0)
+
+            if not isinstance(received, Block) or received.height in seen:
                 continue
             blocks.append(received)
-        if received_point_first:
-            _, _, received, _ = await self.execute()
-            blocks.append(received)
+            seen.add(received.height)
+
+        # Sort blocks by height to ensure they're in the correct order
+        blocks.sort(key=lambda block: block.height)
+
         return blocks
