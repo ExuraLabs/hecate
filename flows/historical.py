@@ -125,7 +125,8 @@ async def sync_epoch(
     name="Historical Sync",
     task_runner=DaskTaskRunner(  # type: ignore[arg-type]
         cluster_kwargs={
-            "n_workers": multiprocessing.cpu_count(),
+            "n_workers": multiprocessing.cpu_count()
+            - 2,  # leave some room for other tasks
             "threads_per_worker": 1,
             "memory_limit": "2GB",
         },

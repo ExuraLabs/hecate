@@ -185,8 +185,8 @@ class HistoricalRedisSink(DataSink):
 
     async def __aenter__(self):
         url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        self.redis = aioredis.from_url(url, decode_responses=True)
-        self.logger.info(f"🔗 Connecting to Redis at {url}")
+        self.redis = aioredis.from_url(url, decode_responses=False)
+        self.logger.debug(f"🔗 Connecting to Redis at {url}")
         # load our Lua once
         self._advance_sha = await self.redis.script_load(_ADVANCE_EPOCH_LUA)
         self.logger.debug("✅ loaded Lua advance script")
