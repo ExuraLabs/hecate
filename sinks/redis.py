@@ -134,9 +134,9 @@ class HistoricalRedisSink(DataSink):
         prefix (str):
             Redis key namespace prefix (default "hecate:history:").
         max_data_batches (int):
-            Max number of block‐batch entries to retain in the data stream (default 100).
+            Max number of block‐batch entries to retain in the data stream (default 10000).
         max_event_entries (int):
-            Max number of event entries to retain in the event stream (default 1000).
+            Max number of event entries to retain in the event stream (default 10000).
 
     Methods:
         __aenter__ / __aexit__:
@@ -160,8 +160,8 @@ class HistoricalRedisSink(DataSink):
         *,
         start_epoch: EpochNumber = FIRST_SHELLEY_EPOCH,
         prefix: str = "hecate:history:",
-        max_data_batches: int = 100,
-        max_event_entries: int = 1000,
+        max_data_batches: int = 10000,
+        max_event_entries: int = 10000,
     ):
         self.prefix = prefix
 
