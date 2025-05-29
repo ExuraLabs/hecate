@@ -227,14 +227,33 @@ class HistoricalRedisSink(DataSink):
 
         self.logger.debug(f"Sent batch for epoch {epoch}, up to height {last_height}")
 
-    async def mark_epoch_complete(self, epoch: EpochNumber) -> EpochNumber:
+    async def mark_epoch_complete(self, epoch: EpochNumber, last_height: BlockHeight) -> EpochNumber:
+        """
+        Marks an epoch as complete by updating Redis with the relevant information
+        and logging the event. This function performs two main tasks:
+
+        1. Adds the epoch to a set of completed epochs and logs the completion event,
+            including the last processed block height consumers should expect for this epoch.
+        2. Executes the Lua script stored in Redis to update the last synced epoch and
+            clean up associated resume data.
+
+        This function ensures synchronization of epoch information and related
+        cleanup tasks.
+
+        :param epoch: The epoch number that has been completed.
+        :type epoch: EpochNumber
+        :param last_height: The last block height processed in the associated epoch.
+        :type last_height: BlockHeight
+        :return: The updated last synced epoch number after Redis executes the Lua script.
+        :rtype: EpochNumber
+        """
         assert self.redis and self._advance_sha, "Redis not initialized"
         # 1) enqueue into ready_set & log event
         pipe = self.redis.pipeline(transaction=True)
         pipe.sadd(self.ready_set, epoch)
         pipe.xadd(
             self.event_stream,
-            {"type": "epoch_complete", "epoch": epoch},
+            {"type": "epoch_complete", "epoch": epoch, "last_height": last_height},
             maxlen=self.max_event_entries,
             approximate=True,
         )

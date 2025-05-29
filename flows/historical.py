@@ -77,6 +77,7 @@ async def sync_epoch(
 
         batches_sent = 0
         batch: list[Block] = []
+        last_height = -1
         async for blocks in client.epoch_blocks(epoch):
             for blk in blocks:
                 # skip blocks already synced
@@ -90,6 +91,7 @@ async def sync_epoch(
                 await sink.send_batch(batch, epoch=epoch)
                 batch_end = time.perf_counter()
                 batches_sent += 1
+                last_height = batch[-1].height
                 logger.debug(
                     f" Batch #{batches_sent}: sent {len(batch)} blocks "
                     f"in {batch_end - batch_start:.2f}s"
@@ -102,12 +104,14 @@ async def sync_epoch(
             await sink.send_batch(batch, epoch=epoch)
             batch_end = time.perf_counter()
             batches_sent += 1
+            last_height = batch[-1].height
             logger.debug(
                 f" Final batch #{batches_sent}: sent {len(batch)} blocks "
                 f"in {batch_end - batch_start:.2f}s"
             )
+            batch.clear()
         # mark done and advance last_synced_epoch
-        new_last = await sink.mark_epoch_complete(epoch)
+        new_last = await sink.mark_epoch_complete(epoch, last_height)
 
     epoch_end = time.perf_counter()
     logger.debug(
