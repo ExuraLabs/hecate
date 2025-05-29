@@ -227,7 +227,9 @@ class HistoricalRedisSink(DataSink):
 
         self.logger.debug(f"Sent batch for epoch {epoch}, up to height {last_height}")
 
-    async def mark_epoch_complete(self, epoch: EpochNumber, last_height: BlockHeight) -> EpochNumber:
+    async def mark_epoch_complete(
+        self, epoch: EpochNumber, last_height: BlockHeight
+    ) -> EpochNumber:
         """
         Marks an epoch as complete by updating Redis with the relevant information
         and logging the event. This function performs two main tasks:
