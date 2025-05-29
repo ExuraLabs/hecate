@@ -76,9 +76,27 @@ class RedisSink(DataSink):
         minus the schema attribute.
         """
         block_data = {"slot": -1, "hash": ""}  # We want these fields to be first
-        block_data |= vars(block)
-        block_data.pop("_schematype")
 
+        # Filter out unwanted fields from the block
+        filtered_block_fields = ("_schematype", "issuer")
+        block_data |= {
+            field: value
+            for field, value in block.__dict__.items()
+            if field not in filtered_block_fields
+            and field != "transactions"  # Handle txs next
+        }
+
+        # Filter out unwanted fields from transactions
+        filtered_tx_fields = ("datums", "scripts", "redeemers")
+        # noinspection PyTypeChecker
+        block_data["transactions"] = [
+            {
+                field: value
+                for field, value in tx.__dict__.items()
+                if field not in filtered_tx_fields
+            }
+            for tx in block.transactions
+        ]
         # Only opinionated modification we do:
         block_data["hash"] = block_data["id"]
         del block_data["id"]
