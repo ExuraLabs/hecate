@@ -135,7 +135,8 @@ async def sync_epoch(
 async def historical_sync_flow(
     *,
     start_epoch: EpochNumber = FIRST_SHELLEY_EPOCH,
-    batch_size: int = 1000,
+    batch_size: int = 100,
+    concurrent_epochs: int = 6,
 ) -> None:
     """
     Retrieves and relays data across a range of epochs against the system checkpoint.
@@ -149,8 +150,10 @@ async def historical_sync_flow(
 
     :param start_epoch: The starting epoch for synchronization. Defaults to FIRST_SHELLEY_EPOCH.
     :type start_epoch: EpochNumber
-    :param batch_size: The number of records processed per batch for synchronization. Defaults to 1000.
+    :param batch_size: The number of records processed per batch for synchronization. Defaults to 100.
     :type batch_size: int
+    :param concurrent_epochs: The number of epochs to process concurrently before waiting. Defaults to 6.
+    :type concurrent_epochs: int
     :return: This flow does not return any value.
     :rtype: None
     """
@@ -166,11 +169,31 @@ async def historical_sync_flow(
         start_epoch = last + 1
     target = get_system_checkpoint()
 
-    epochs = range(start_epoch, target + 1)
-    # fire off one sync_epoch per epoch, all at once
-    futures = sync_epoch.map(epoch=epochs, batch_size=batch_size)
-    # and wait for all to finish
-    wait(futures)
+    epochs = list(range(start_epoch, target + 1))
+    total_epochs = len(epochs)
+    logger.info(f"Processing {total_epochs} epochs in batches of {concurrent_epochs}")
+
+    # Process epochs in batches of concurrent_epochs
+    for i in range(0, total_epochs, concurrent_epochs):
+        batch_start = time.perf_counter()
+        batch_epochs = epochs[i : i + concurrent_epochs]
+        batch_num = (i // concurrent_epochs) + 1
+        total_batches = (total_epochs + concurrent_epochs - 1) // concurrent_epochs
+
+        logger.info(
+            f"🔄 Starting batch {batch_num}/{total_batches}: epochs {batch_epochs[0]} to {batch_epochs[-1]}"
+        )
+
+        # Fire off sync_epoch tasks for this batch
+        futures = sync_epoch.map(epoch=batch_epochs, batch_size=batch_size)
+
+        # Wait for all tasks in this batch to finish
+        wait(futures)
+
+        batch_end = time.perf_counter()
+        logger.info(
+            f"✅ Completed batch {batch_num}/{total_batches} in {batch_end - batch_start:.2f}s"
+        )
 
     flow_end = time.perf_counter()
     logger.info(f"🏁 Historical sync complete in {flow_end - flow_start:.2f}s")
