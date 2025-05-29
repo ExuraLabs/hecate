@@ -75,10 +75,10 @@ class RedisSink(DataSink):
         This method sends over the entire content of the block in dictionary format,
         minus the schema attribute.
         """
-        block_data = {"slot": -1, "hash": ""}  # We want these fields to be first
+        block_data = {"slot": -1, "hash": block.id}  # We want these fields to be first
 
         # Filter out unwanted fields from the block
-        filtered_block_fields = ("_schematype", "issuer")
+        filtered_block_fields = ("_schematype", "issuer", "id")
         block_data |= {
             field: value
             for field, value in block.__dict__.items()
@@ -92,14 +92,11 @@ class RedisSink(DataSink):
         block_data["transactions"] = [
             {
                 field: value
-                for field, value in tx.__dict__.items()
+                for field, value in tx.items()
                 if field not in filtered_tx_fields
             }
             for tx in block.transactions
         ]
-        # Only opinionated modification we do:
-        block_data["hash"] = block_data["id"]
-        del block_data["id"]
 
         return block_data
 
