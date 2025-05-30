@@ -21,8 +21,7 @@ dev = [
     "types-requests>=2.32.0.20250328",
 ]
 redis = [
-    "redis>=5.2.1",
-    "hiredis>=3.2.1",
+    "redis[hiredis]>=5.2.1",
 ]
 prefect = [
     "prefect[dask,github]>=3.3.3",
