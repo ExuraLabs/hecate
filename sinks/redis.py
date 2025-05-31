@@ -294,7 +294,7 @@ class HistoricalRedisSink(DataSink):
         """Get the last synced epoch from Redis, or `start_epoch` if not set"""
         assert self.redis, "Not initialized"
         val = await self.redis.get(self.last_synced_epoch)
-        return EpochNumber(int(val or self.start_epoch))
+        return EpochNumber(int(val)) if val else self.start_epoch
 
     async def get_epoch_resume_height(self, epoch: EpochNumber) -> BlockHeight | None:
         assert self.redis, "Not initialized"
