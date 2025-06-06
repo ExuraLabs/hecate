@@ -104,7 +104,7 @@ class RedisSink(DataSink):
 # Lua script to atomically advance last_synced_epoch
 _ADVANCE_EPOCH_LUA = r"""
 local last_synced_epoch, ready_set, resume_map = KEYS[1], KEYS[2], KEYS[3]
-local cur = tonumber(redis.call("GET", last_synced_epoch)) or 207  -- Last Byron epoch
+local cur = tonumber(redis.call("GET", last_synced_epoch))
 local next = cur + 1
 while redis.call("SISMEMBER", ready_set, tostring(next)) == 1 do
   redis.call("SREM", ready_set, tostring(next))
@@ -206,7 +206,7 @@ class HistoricalRedisSink(DataSink):
         self._advance_sha = await self.redis.script_load(_ADVANCE_EPOCH_LUA)
         self.logger.debug("✅ loaded Lua advance script")
         # ensure last_synced_epoch exists
-        await self.redis.setnx(self.last_synced_epoch, self.start_epoch)
+        await self.redis.setnx(self.last_synced_epoch, self.start_epoch - 1)
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
