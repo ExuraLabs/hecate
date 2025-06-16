@@ -22,7 +22,7 @@ jobs:
         id: check_pr
         run: |
           PRS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-          "https://api.github.com/repos/${{ github.repository }}/pulls?head=${{ github.repository_owner }}:feature-branch")
+          "https://api.github.com/repos/${{ github.repository_owner }}/${{ github.repository }}/pulls?state=open&head=automated/epoch-updates")
 
           if [[ "$PRS" != "[]" ]]; then
             echo "PR already exists, exiting..."
