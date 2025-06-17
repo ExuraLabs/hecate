@@ -22,7 +22,7 @@ jobs:
         id: check_pr
         run: |
           PRS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-          "https://api.github.com/repos/${{ github.repository_owner }}/${{ github.repository }}/pulls?state=open&head=automated/epoch-updates")
+          "https://api.github.com/repos/ExuraLabs/hecate/pulls?state=open&head=ExuraLabs:automated/epoch-updates")
 
           if [[ "$PRS" != "[]" ]]; then
             echo "PR already exists, skipping creation..."
@@ -40,7 +40,7 @@ jobs:
           echo "EPOCH=$EPOCH" >> $GITHUB_ENV
 
       - name: Create Pull Request via GitHub CLI
-        if: steps.check_pr.outputs.skip_pr
+        if: steps.check_pr.outputs.skip_pr != 'true'
         run: |
           BODY="## 📊 Automated Epoch Update
 
