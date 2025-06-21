@@ -22,7 +22,7 @@ jobs:
         id: check_pr
         run: |
           PRS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-          "https://api.github.com/repos/ExuraLabs/hecate/pulls?state=open&head=ExuraLabs:automated/epoch-updates")
+          "https://api.github.com/repos/ExuraLabs/hecate/pulls?state=open&head=ExuraLabs:automated/epoch-updates" | jq)
 
           if [[ "$PRS" != "[]" ]]; then
             echo "PR already exists, skipping creation..."
