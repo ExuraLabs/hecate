@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 class AdaptiveMemoryConfig(BaseModel):
     """Configuration for the Adaptive Memory Controller."""
 
-    memory_limit_gb: float = 24.0
+    memory_limit_gb: float = 16.0
     warning_threshold: float = 0.75
     critical_threshold: float = 0.85
     emergency_threshold: float = 0.90
