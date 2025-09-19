@@ -1,6 +1,7 @@
-import multiprocessing
 import time
 from typing import Any
+import asyncio
+from models import BlockHeight
 
 from ogmios import Block
 import ogmios.model.model_map as mm
@@ -15,6 +16,18 @@ from sinks.redis import HistoricalRedisSink
 
 from flows import get_system_checkpoint
 from models import EpochNumber
+from flows.adaptive_memory_controller import (
+    AdaptiveMemoryConfig,
+    AdaptiveMemoryController,
+)
+from sinks.backpressure_monitor import RedisBackpressureConfig
+from monitoring.metrics_collector import MetricsCollector, SystemSnapshot
+from config.settings import (
+    get_batch_settings,
+    get_dask_settings,
+    get_memory_settings,
+    get_redis_settings,
+)
 
 
 def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
@@ -52,16 +65,26 @@ def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
 async def sync_epoch(
     epoch: EpochNumber,
     batch_size: int,
+    min_batch_size: int,
+    memory_config: AdaptiveMemoryConfig,
+    backpressure_config: RedisBackpressureConfig,
 ) -> EpochNumber:
     """
     Synchronize a specific epoch by fetching blocks of data in batches and relaying them.
     The function streams block data from the ledger for a given epoch, sends them to a sink in
     configurable batch sizes and marks the epoch as complete once fully processed.
+    It adapts the batch size based on memory pressure and pauses if Redis backpressure is high.
 
     :param epoch: The epoch number to synchronize.
     :type epoch: EpochNumber
     :param batch_size: The number of blocks to process in each batch.
     :type batch_size: int
+    :param min_batch_size: The minimum batch size to use when memory is constrained.
+    :type min_batch_size: int
+    :param memory_config: Configuration for the adaptive memory controller.
+    :type memory_config: AdaptiveMemoryConfig
+    :param backpressure_config: Configuration for the Redis backpressure monitor.
+    :type backpressure_config: RedisBackpressureConfig
     :return: The updated epoch number indicating the last successfully synced epoch.
     :rtype: EpochNumber
     """
@@ -70,21 +93,42 @@ async def sync_epoch(
     logger.debug(f"▶️  Starting sync for epoch {epoch}")
 
     Block.__init__ = fast_block_init
+    mem_controller = AdaptiveMemoryController(config=memory_config)
+    current_batch_size = batch_size
 
     # Fetch _and_ stream blocks concurrently
-    async with HistoricalRedisSink() as sink, HecateClient() as client:
+    async with HistoricalRedisSink(
+        backpressure_config=backpressure_config
+    ) as sink, HecateClient() as client:
+        # Instantiate the metrics collector now that we have a redis client
+        metrics_collector = MetricsCollector(
+            redis_client=sink.redis, stream_key=sink.data_stream
+        )
+
         start_height = await sink.get_epoch_resume_height(epoch) or None
 
         batches_sent = 0
         batch: list[Block] = []
-        last_height = -1
+        last_height: BlockHeight | int = -1
         async for blocks in client.epoch_blocks(epoch):
+            # Emergency pause if memory is critical
+            if mem_controller.should_pause_processing():
+                logger.warning(f"Memory emergency for epoch {epoch}, pausing for 15s...")
+                await asyncio.sleep(15)
+
+            # Adjust batch size based on memory
+            if mem_controller.should_reduce_batch_size():
+                current_batch_size = max(min_batch_size, int(current_batch_size / 2))
+                logger.info(f"Reducing batch size to {current_batch_size} due to memory pressure.")
+            else:
+                current_batch_size = batch_size  # Restore if memory is okay
+
             for blk in blocks:
                 # skip blocks already synced
                 if start_height and blk.height <= start_height:
                     continue
                 batch.append(blk)
-                if len(batch) < batch_size:
+                if len(batch) < current_batch_size:
                     continue
                 # send batch to sink
                 batch_start = time.perf_counter()
@@ -92,6 +136,11 @@ async def sync_epoch(
                 batch_end = time.perf_counter()
                 batches_sent += 1
                 last_height = batch[-1].height
+
+                # Collect and log metrics after sending a batch
+                snapshot = await metrics_collector.collect_snapshot(len(batch))
+                logger.info(f"Metrics Snapshot: {snapshot}")
+
                 logger.debug(
                     f" Batch #{batches_sent}: sent {len(batch)} blocks "
                     f"in {batch_end - batch_start:.2f}s"
@@ -105,13 +154,18 @@ async def sync_epoch(
             batch_end = time.perf_counter()
             batches_sent += 1
             last_height = batch[-1].height
+
+            # Collect and log metrics for the final batch
+            snapshot = await metrics_collector.collect_snapshot(len(batch))
+            logger.info(f"Metrics Snapshot: {snapshot}")
+
             logger.debug(
                 f" Final batch #{batches_sent}: sent {len(batch)} blocks "
                 f"in {batch_end - batch_start:.2f}s"
             )
             batch.clear()
         # mark done and advance last_synced_epoch
-        new_last = await sink.mark_epoch_complete(epoch, last_height)
+        new_last = await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
 
     epoch_end = time.perf_counter()
     logger.debug(
@@ -125,18 +179,20 @@ async def sync_epoch(
     name="Historical Sync",
     task_runner=DaskTaskRunner(  # type: ignore[arg-type]
         cluster_kwargs={
-            "n_workers": multiprocessing.cpu_count()
-            - 2,  # leave some room for other tasks
+            "n_workers": get_dask_settings().n_workers,
             "threads_per_worker": 1,
-            "memory_limit": "2GB",
+            "memory_limit": get_dask_settings().worker_memory_limit,
         },
     ),
 )
 async def historical_sync_flow(
     *,
     start_epoch: EpochNumber = FIRST_SHELLEY_EPOCH,
-    batch_size: int = 100,
-    concurrent_epochs: int = 6,
+    batch_size: int | None = None,
+    min_batch_size: int | None = None,
+    concurrent_epochs: int | None = None,
+    memory_config: AdaptiveMemoryConfig | None = None,
+    backpressure_config: RedisBackpressureConfig | None = None,
 ) -> None:
     """
     Retrieves and relays data across a range of epochs against the system checkpoint.
@@ -152,42 +208,70 @@ async def historical_sync_flow(
     :type start_epoch: EpochNumber
     :param batch_size: The number of records processed per batch for synchronization. Defaults to 100.
     :type batch_size: int
+    :param min_batch_size: The minimum batch size to use when memory is constrained.
+    :type min_batch_size: int
     :param concurrent_epochs: The number of epochs to process concurrently before waiting. Defaults to 6.
     :type concurrent_epochs: int
+    :param memory_config: Configuration for the adaptive memory controller.
+    :type memory_config: AdaptiveMemoryConfig | None
+    :param backpressure_config: Configuration for the Redis backpressure monitor.
+    :type backpressure_config: RedisBackpressureConfig | None
     :return: This flow does not return any value.
     :rtype: None
     """
     logger = get_run_logger()
     flow_start = time.perf_counter()
-    async with HistoricalRedisSink(start_epoch=start_epoch) as sink:
-        # Here we resume from where we left off or tell redis last_synced_epoch = start_epoch
-        last = await sink.get_last_synced_epoch()
-    if last > start_epoch:
-        logger.info(
-            f"🔄 Resuming after last synced epoch {last} instead of {start_epoch}"
-        )
-        start_epoch = last + 1
-    target = get_system_checkpoint()
 
+    # Load settings from centralized config if not provided explicitly
+    batch_settings = get_batch_settings()
+    final_batch_size = batch_size or batch_settings.base_size
+    final_min_batch_size = min_batch_size or batch_settings.min_size
+    final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers
+
+    effective_memory_config = memory_config or AdaptiveMemoryConfig(
+        **get_memory_settings().model_dump()
+    )
+
+    redis_settings = get_redis_settings()
+    effective_backpressure_config = backpressure_config or RedisBackpressureConfig(
+        max_depth=redis_settings.max_stream_depth,
+        check_interval=redis_settings.check_interval,
+    )
+
+    async with HistoricalRedisSink(
+        start_epoch=start_epoch, backpressure_config=effective_backpressure_config
+    ) as sink:
+        last = await sink.get_last_synced_epoch()
+
+    if last > start_epoch:
+        logger.info(f"🔄 Resuming after last synced epoch {last} instead of {start_epoch}")
+        start_epoch = last + 1
+
+    target = get_system_checkpoint()
     epochs = list(range(start_epoch, target + 1))
     total_epochs = len(epochs)
-    logger.info(f"Processing {total_epochs} epochs in batches of {concurrent_epochs}")
+    logger.info(f"Processing {total_epochs} epochs in batches of {final_concurrent_epochs}")
 
-    # Process epochs in batches of concurrent_epochs
-    for i in range(0, total_epochs, concurrent_epochs):
+    for i in range(0, total_epochs, final_concurrent_epochs):
         batch_start = time.perf_counter()
-        batch_epochs = epochs[i : i + concurrent_epochs]
-        batch_num = (i // concurrent_epochs) + 1
-        total_batches = (total_epochs + concurrent_epochs - 1) // concurrent_epochs
+        batch_epochs = epochs[i : i + final_concurrent_epochs]
+        batch_num = (i // final_concurrent_epochs) + 1
+        total_batches = (total_epochs + final_concurrent_epochs - 1) // final_concurrent_epochs
 
         logger.info(
-            f"🔄 Starting batch {batch_num}/{total_batches}: epochs {batch_epochs[0]} to {batch_epochs[-1]}"
+            (
+                f"🔄 Starting batch {batch_num}/{total_batches}: "
+                f"epochs {batch_epochs[0]} to {batch_epochs[-1]}"
+            )
         )
 
-        # Fire off sync_epoch tasks for this batch
-        futures = sync_epoch.map(epoch=batch_epochs, batch_size=batch_size)
-
-        # Wait for all tasks in this batch to finish
+        futures = sync_epoch.map(
+            epoch=batch_epochs,
+            batch_size=final_batch_size,
+            min_batch_size=final_min_batch_size,
+            memory_config=effective_memory_config,
+            backpressure_config=effective_backpressure_config,
+        )
         wait(futures)
 
         batch_end = time.perf_counter()

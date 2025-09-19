@@ -1,4 +1,3 @@
-import os
 from typing import Any, AsyncIterator
 
 from ogmios import Block, Point
@@ -9,6 +8,7 @@ from websockets import connect, ClientConnection
 
 from client.chainsync import AsyncFindIntersection, AsyncNextBlock
 from client.ledgerstate import AsyncEpoch, AsyncEraSummaries, AsyncTip
+from client.multi_source_balancer import MultiSourceBalancer
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
 
 from models import EpochNumber
@@ -16,34 +16,26 @@ from models import EpochNumber
 
 class HecateClient(OgmiosClient):  # type: ignore[misc]
     """
-    Async Ogmios connection client
+    Async Ogmios connection client with multi-source load balancing.
 
     Asynchronous wrapper of the Ogmios websockets client.
     Inherits from OgmiosClient for type compatibility but implements
     its own async connection management as well as additional, higher-level methods.
+    It uses a MultiSourceBalancer to distribute requests across multiple Ogmios instances.
 
-    :param host: The host of the Ogmios server.
-        If not provided, defaults the value of the environment variable ``OGMIOS_HOST`` if set,
-        or ``localhost`` otherwise.
-    :param port: The port of the Ogmios server.
-        If not provided, defaults to 1337, unless the environment variable ``OGMIOS_PORT`` is set,
-        in which case it will use that value instead.
-    :param path: Optional path for the WebSocket connection
-    :param secure: Use secure connection
-    :param rpc_version: The JSON-RPC version to use
+    :param balancer: A MultiSourceBalancer instance. If not provided, it will be
+        created from environment variables.
+    :param rpc_version: The JSON-RPC version to use.
     """
 
     # noinspection PyMissingConstructor
     def __init__(
         self,
-        host: str | None = None,
-        port: int = 1337,
-        path: str = "",
-        secure: bool = False,
+        balancer: MultiSourceBalancer | None = None,
         rpc_version: Jsonrpc = Jsonrpc.field_2_0,
     ) -> None:
         self.rpc_version = rpc_version
-        self.connect_str: str = self.get_connection_url(host, port, path, secure)
+        self.balancer = balancer or MultiSourceBalancer.from_env()
         self.connection: ClientConnection | None = None
 
         # chainsync methods
@@ -57,83 +49,55 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
 
     # Connection management
     async def __aenter__(self) -> "HecateClient":
+        self.balancer.start_health_checks()
         await self.connect()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Close client connection when finished"""
+        """Close client connection and stop health checks when finished"""
+        await self.balancer.stop_health_checks()
         await self.close()
 
-    @staticmethod
-    def get_connection_url(
-        host: str | None = None,
-        port: int = 1337,
-        path: str = "",
-        secure: bool = False,
-    ) -> str:
-        """
-        Generate a WebSocket connection URLto interact with an Ogmios instance.
-
-        Constructs a connection URL using the provided parameters. It also supports
-        using environment variables for the host and port configuration if they are not explicitly
-        provided. The connection protocol can be set to secure (wss) or non-secure (ws), and a
-        specific path can be appended to the constructed URL.
-
-        :param host: The hostname of the server. If not provided, it defaults to the
-            value of the environment variable ``OGMIOS_HOST`` if set, or ``localhost`` otherwise.
-        :param port: The port number to connect to. Defaults to 1337. If the
-            environment variable ``OGMIOS_PORT`` is set, its value will be used instead.
-        :param path: The URL path to append to the connection string. Defaults to an
-            empty string.
-        :param secure: A boolean flag indicating whether to use a secure WebSocket
-            connection (wss) or a non-secure one (ws). Defaults to ``False``.
-        :return: A constructed WebSocket connection URL as a string.
-        :rtype: str
-        """
-        _OGMIOS_HOST = os.getenv("OGMIOS_HOST")
-        if host is None and _OGMIOS_HOST:
-            host = _OGMIOS_HOST
-        else:
-            host = host or "localhost"
-
-        _OGMIOS_PORT = os.getenv("OGMIOS_PORT")
-        if _OGMIOS_PORT:
-            port = int(_OGMIOS_PORT)
-
-        protocol: str = "wss" if secure else "ws"
-        connect_str = f"{protocol}://{host}:{port}/{path}"
-        return connect_str
-
     async def connect(self, **connection_params: Any) -> None:
-        """Connect to the Ogmios server"""
-        if self.connection is None:
-            self.connection = await connect(self.connect_str, **connection_params)
+        """Connect to the best available Ogmios server from the balancer."""
+        if self.connection is not None:
+            await self.connection.close()
+
+        endpoint = self.balancer.get_best_endpoint()
+        self.connection = await connect(str(endpoint.url), **connection_params)
 
     async def close(self) -> None:
         """Close the connection to the Ogmios server"""
         if self.connection:
             await self.connection.close()
+            self.connection = None
 
     async def send(self, request: str) -> None:
-        """Send a request to the Ogmios server asynchronously
+        """Send a request to the Ogmios server asynchronously.
+        If the connection is lost, it will try to reconnect to the next best endpoint.
 
         :param request: The request to send
         :type request: str
         """
-        if not self.connection:
+        try:
+            if not self.connection or self.connection.closed:
+                await self.connect()
+            assert self.connection is not None
+            await self.connection.send(request)
+        except Exception:
+            # Reconnect on failure
             await self.connect()
             assert self.connection is not None
-
-        await self.connection.send(request)
+            await self.connection.send(request)
 
     async def receive(self) -> dict[str, Any]:
         """Receive a response from the Ogmios server
 
         :return: Request response
         """
-        if self.connection is None:
+        if not self.connection or self.connection.closed:
             await self.connect()
-            assert self.connection is not None
+        assert self.connection is not None
 
         raw_response = await self.connection.recv()
         resp: dict[str, Any] = json.loads(raw_response)
