@@ -15,7 +15,6 @@ class RedisBackpressureConfig(BaseModel):
     check_interval: int = 5
 
 
-
 class RedisBackpressureMonitor:
     """
     Monitors Redis streams to apply backpressure and prevent OOM issues.

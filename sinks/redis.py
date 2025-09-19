@@ -1,5 +1,4 @@
 import importlib
-import os
 from typing import Any
 
 import orjson as json
@@ -17,7 +16,6 @@ from sinks.backpressure_monitor import (
 
 _redis_module = importlib.import_module("redis.asyncio")
 aioredis = _redis_module
-
 
 
 class RedisSink(DataSink):

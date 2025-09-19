@@ -1,5 +1,4 @@
 import json
-import os
 from functools import lru_cache
 from typing import List, Dict, Any
 
@@ -36,7 +35,6 @@ class MemorySettings(BaseSettings):
     critical_threshold: float = Field(alias="MEMORY_CRITICAL_THRESHOLD", default=0.85)
     emergency_threshold: float = Field(alias="MEMORY_EMERGENCY_THRESHOLD", default=0.90)
     check_interval_seconds: int = 10
-
 
 
 class RedisSettings(BaseSettings):
@@ -77,7 +75,6 @@ class OgmiosSettings(BaseSettings):
     def endpoints(self) -> List[Dict[str, Any]]:
         return json.loads(self.endpoints_str)
 
-    
 
 @lru_cache
 def get_dask_settings() -> DaskSettings:

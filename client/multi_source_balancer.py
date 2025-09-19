@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 import random
 from typing import List, Optional
 
@@ -47,7 +46,9 @@ class MultiSourceBalancer:
         endpoints = [OgmiosEndpoint(**data) for data in endpoints_data]
         return cls(endpoints)
 
-    async def _check_health(self, session: aiohttp.ClientSession, endpoint: OgmiosEndpoint) -> None:
+    async def _check_health(
+        self, session: aiohttp.ClientSession, endpoint: OgmiosEndpoint
+    ) -> None:
         """Performs a health check on a single endpoint."""
         try:
             start_time = asyncio.get_event_loop().time()
@@ -60,10 +61,14 @@ class MultiSourceBalancer:
                 if is_healthy:
                     endpoint.is_healthy = True
                     endpoint.latency_ms = (end_time - start_time) * 1000
-                    logger.debug(f"Endpoint {endpoint.url} is healthy (latency: {endpoint.latency_ms:.2f}ms).")
+                    logger.debug(
+                        f"Endpoint {endpoint.url} is healthy (latency: {endpoint.latency_ms:.2f}ms)."
+                    )
                 else:
                     endpoint.is_healthy = False
-                    logger.warning(f"Endpoint {endpoint.url} is unhealthy (sync: {data.get('networkSynchronization')}).")
+                    logger.warning(
+                        f"Endpoint {endpoint.url} is unhealthy (sync: {data.get('networkSynchronization')})."
+                    )
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             endpoint.is_healthy = False
@@ -103,7 +108,9 @@ class MultiSourceBalancer:
         healthy_endpoints = [ep for ep in self.endpoints if ep.is_healthy]
 
         if not healthy_endpoints:
-            logger.error("No healthy Ogmios endpoints available! Falling back to all endpoints.")
+            logger.error(
+                "No healthy Ogmios endpoints available! Falling back to all endpoints."
+            )
             # Fallback to using any endpoint if all are unhealthy
             healthy_endpoints = self.endpoints
 
@@ -120,6 +127,6 @@ class MultiSourceBalancer:
             if current_weight >= selection:
                 logger.debug(f"Selected Ogmios endpoint: {endpoint.url}")
                 return endpoint
-        
+
         # Fallback in case of floating point inaccuracies
         return random.choice(healthy_endpoints)

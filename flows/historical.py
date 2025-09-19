@@ -21,7 +21,7 @@ from flows.adaptive_memory_controller import (
     AdaptiveMemoryController,
 )
 from sinks.backpressure_monitor import RedisBackpressureConfig
-from monitoring.metrics_collector import MetricsCollector, SystemSnapshot
+from monitoring.metrics_collector import MetricsCollector
 from config.settings import (
     get_batch_settings,
     get_dask_settings,
@@ -97,9 +97,10 @@ async def sync_epoch(
     current_batch_size = batch_size
 
     # Fetch _and_ stream blocks concurrently
-    async with HistoricalRedisSink(
-        backpressure_config=backpressure_config
-    ) as sink, HecateClient() as client:
+    async with (
+        HistoricalRedisSink(backpressure_config=backpressure_config) as sink,
+        HecateClient() as client,
+    ):
         # Instantiate the metrics collector now that we have a redis client
         metrics_collector = MetricsCollector(
             redis_client=sink.redis, stream_key=sink.data_stream
@@ -113,13 +114,17 @@ async def sync_epoch(
         async for blocks in client.epoch_blocks(epoch):
             # Emergency pause if memory is critical
             if mem_controller.should_pause_processing():
-                logger.warning(f"Memory emergency for epoch {epoch}, pausing for 15s...")
+                logger.warning(
+                    f"Memory emergency for epoch {epoch}, pausing for 15s..."
+                )
                 await asyncio.sleep(15)
 
             # Adjust batch size based on memory
             if mem_controller.should_reduce_batch_size():
                 current_batch_size = max(min_batch_size, int(current_batch_size / 2))
-                logger.info(f"Reducing batch size to {current_batch_size} due to memory pressure.")
+                logger.info(
+                    f"Reducing batch size to {current_batch_size} due to memory pressure."
+                )
             else:
                 current_batch_size = batch_size  # Restore if memory is okay
 
@@ -244,19 +249,25 @@ async def historical_sync_flow(
         last = await sink.get_last_synced_epoch()
 
     if last > start_epoch:
-        logger.info(f"🔄 Resuming after last synced epoch {last} instead of {start_epoch}")
+        logger.info(
+            f"🔄 Resuming after last synced epoch {last} instead of {start_epoch}"
+        )
         start_epoch = last + 1
 
     target = get_system_checkpoint()
     epochs = list(range(start_epoch, target + 1))
     total_epochs = len(epochs)
-    logger.info(f"Processing {total_epochs} epochs in batches of {final_concurrent_epochs}")
+    logger.info(
+        f"Processing {total_epochs} epochs in batches of {final_concurrent_epochs}"
+    )
 
     for i in range(0, total_epochs, final_concurrent_epochs):
         batch_start = time.perf_counter()
         batch_epochs = epochs[i : i + final_concurrent_epochs]
         batch_num = (i // final_concurrent_epochs) + 1
-        total_batches = (total_epochs + final_concurrent_epochs - 1) // final_concurrent_epochs
+        total_batches = (
+            total_epochs + final_concurrent_epochs - 1
+        ) // final_concurrent_epochs
 
         logger.info(
             (

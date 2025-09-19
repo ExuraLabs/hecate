@@ -41,7 +41,9 @@ class AdaptiveMemoryController:
         self._current_state: MemoryState | None = None
 
         # Calculate absolute thresholds in GB
-        self.warning_limit_gb = self.config.memory_limit_gb * self.config.warning_threshold
+        self.warning_limit_gb = (
+            self.config.memory_limit_gb * self.config.warning_threshold
+        )
         self.critical_limit_gb = (
             self.config.memory_limit_gb * self.config.critical_threshold
         )
@@ -49,16 +51,24 @@ class AdaptiveMemoryController:
             self.config.memory_limit_gb * self.config.emergency_threshold
         )
 
-        logger.info(f"AdaptiveMemoryController initialized with limit: {self.config.memory_limit_gb:.2f} GB")
-        logger.info(f"  - Warning threshold:  {self.warning_limit_gb:.2f} GB ({self.config.warning_threshold:.0%})")
-        logger.info(f"  - Critical threshold: {self.critical_limit_gb:.2f} GB ({self.config.critical_threshold:.0%})")
-        logger.info(f"  - Emergency threshold: {self.emergency_limit_gb:.2f} GB ({self.config.emergency_threshold:.0%})")
+        logger.info(
+            f"AdaptiveMemoryController initialized with limit: {self.config.memory_limit_gb:.2f} GB"
+        )
+        logger.info(
+            f"  - Warning threshold:  {self.warning_limit_gb:.2f} GB ({self.config.warning_threshold:.0%})"
+        )
+        logger.info(
+            f"  - Critical threshold: {self.critical_limit_gb:.2f} GB ({self.config.critical_threshold:.0%})"
+        )
+        logger.info(
+            f"  - Emergency threshold: {self.emergency_limit_gb:.2f} GB ({self.config.emergency_threshold:.0%})"
+        )
 
     def _get_current_memory_usage(self) -> MemoryState:
         """Gets the current memory usage of the process and its children."""
         mem_info = self.process.memory_info()
         total_used_bytes = mem_info.rss
-        
+
         # Include memory from child processes
         children = self.process.children(recursive=True)
         for child in children:
@@ -68,9 +78,9 @@ class AdaptiveMemoryController:
                 continue
 
         used_gb = total_used_bytes / (1024**3)
-        
+
         return MemoryState(
-            total_gb=self.config.memory_limit_gb, # This is the configured limit, not system total
+            total_gb=self.config.memory_limit_gb,  # This is the configured limit, not system total
             available_gb=self.config.memory_limit_gb - used_gb,
             used_gb=used_gb,
             used_percent=used_gb / self.config.memory_limit_gb,

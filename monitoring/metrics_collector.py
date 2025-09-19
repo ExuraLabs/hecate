@@ -1,11 +1,12 @@
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional
 
 import psutil
 import redis.asyncio as redis
-from client.multi_source_balancer import MultiSourceBalancer, OgmiosEndpoint
+from client.multi_source_balancer import MultiSourceBalancer
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ class MetricsCollector:
                     total_used_bytes += child.memory_info().rss
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
-            
+
             total_gb = psutil.virtual_memory().total / (1024**3)
             used_gb = total_used_bytes / (1024**3)
             used_percent = (used_gb / total_gb) * 100
@@ -118,7 +119,7 @@ class MetricsCollector:
                 )
             except Exception as e:
                 logger.exception(f"Error in monitoring loop: {e}")
-            
+
             await asyncio.sleep(self.interval)
 
     async def start(self):
@@ -147,7 +148,7 @@ class MetricsCollector:
             except asyncio.CancelledError:
                 pass
             logger.info("Metrics collector stopped.")
-        
+
         if self._redis_client:
             await self._redis_client.close()
             logger.info("Metrics collector Redis connection closed.")
