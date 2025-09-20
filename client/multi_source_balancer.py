@@ -4,7 +4,7 @@ import random
 from typing import List, Optional
 
 import aiohttp
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, WebsocketUrl
 
 from config.settings import get_ogmios_settings
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class OgmiosEndpoint(BaseModel):
     """Represents a single Ogmios endpoint with health and weight."""
 
-    url: HttpUrl
+    url: WebsocketUrl
     weight: float = Field(
         1.0, description="Weight for load balancing (higher is more preferred)."
     )
