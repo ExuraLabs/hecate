@@ -63,7 +63,8 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         if self.connection is not None:
             await self.connection.close()
 
-        endpoint = self.balancer.get_best_endpoint()
+        endpoint = await self.balancer.get_best_endpoint()
+        print(f"Connecting to Ogmios at {endpoint.url}")
         self.connection = await connect(str(endpoint.url), **connection_params)
 
     async def close(self) -> None:
@@ -80,9 +81,9 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         :type request: str
         """
         try:
-            if not self.connection or self.connection.closed:
+            if not self.connection:
                 await self.connect()
-            assert self.connection is not None
+                assert self.connection is not None
             await self.connection.send(request)
         except Exception:
             # Reconnect on failure
@@ -95,9 +96,9 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
 
         :return: Request response
         """
-        if not self.connection or self.connection.closed:
+        if self.connection is None:
             await self.connect()
-        assert self.connection is not None
+            assert self.connection is not None
 
         raw_response = await self.connection.recv()
         resp: dict[str, Any] = json.loads(raw_response)
