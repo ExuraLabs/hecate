@@ -6,7 +6,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-env_file = ".env"  # ".env.production"
+env_file = ".env.production"  # ".env.production"
 
 class GeneralSettings(BaseSettings):
     """General application settings."""
@@ -62,6 +62,15 @@ class BatchSettings(BaseSettings):
     max_size: int = Field(alias="MAX_BATCH_SIZE", default=400)
 
 
+class MonitoringSettings(BaseSettings):
+    """Monitoring and metrics settings."""
+
+    model_config = SettingsConfigDict(
+        env_file=env_file, env_file_encoding="utf-8", extra="ignore"
+    )
+    snapshot_frequency: int = Field(alias="SNAPSHOT_FREQUENCY", default=5)
+
+
 class OgmiosSettings(BaseSettings):
     """Ogmios multi-source balancer settings."""
 
@@ -99,6 +108,11 @@ def get_batch_settings() -> BatchSettings:
 
 
 @lru_cache
+def get_monitoring_settings() -> MonitoringSettings:
+    return MonitoringSettings()
+
+
+@lru_cache
 def get_ogmios_settings() -> OgmiosSettings:
     # Set the environment variable for other parts of the app that might use it directly
     # os.environ["OGMIOS_ENDPOINTS"] = OgmiosSettings().endpoints
@@ -111,6 +125,7 @@ def load_all_settings():
     get_memory_settings()
     get_redis_settings()
     get_batch_settings()
+    get_monitoring_settings()
     get_ogmios_settings()
 
 

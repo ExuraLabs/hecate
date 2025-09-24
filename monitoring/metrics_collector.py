@@ -42,7 +42,7 @@ class MetricsCollector:
 
         # For BPS calculation
         self._last_block_count = 0
-        self._last_check_time = time.time()
+        self._last_check_time = 0  # Will be set on first update
 
     async def _get_memory_usage_gb(self) -> tuple[float, float]:
         """Calculates the total memory usage for the current process and its children."""
@@ -78,44 +78,102 @@ class MetricsCollector:
     def _get_ogmios_status(self) -> Dict[str, Dict[str, Any]]:
         """Gets the status of Ogmios endpoints from the balancer."""
         if not self.balancer:
+            logger.debug("No balancer available for ogmios status")
             return {}
-        return {
-            str(ep.url): {
-                "is_healthy": ep.is_healthy,
-                "latency_ms": f"{ep.latency_ms:.2f}",
-                "weight": ep.weight,
+        
+        if not hasattr(self.balancer, 'endpoints') or not self.balancer.endpoints:
+            logger.debug("No endpoints found in balancer")
+            return {}
+            
+        try:
+            status = {
+                str(ep.url): {
+                    "is_healthy": ep.is_healthy,
+                    "latency_ms": f"{ep.latency_ms:.2f}",
+                    "weight": ep.weight,
+                }
+                for ep in self.balancer.endpoints
             }
-            for ep in self.balancer.endpoints
-        }
+            logger.debug(f"Collected ogmios status for {len(status)} endpoints")
+            return status
+        except Exception as e:
+            logger.error(f"Error collecting ogmios status: {e}")
+            return {}
+
+    def update_block_count(self, blocks_processed: int) -> None:
+        """Update the count of blocks processed for BPS calculation."""
+        self._last_block_count += blocks_processed
+        # Update timing immediately when blocks are processed
+        if self._last_check_time == 0:  # First time
+            self._last_check_time = time.time()
+
+    def _calculate_blocks_per_second(self) -> float:
+        """Calculate blocks per second based on recent processing."""
+        try:
+            current_time = time.time()
+            
+            # If no blocks have been processed yet, return 0
+            if self._last_check_time == 0 or self._last_block_count == 0:
+                return 0.0
+                
+            time_elapsed = current_time - self._last_check_time
+            
+            # If no time has elapsed, return 0
+            if time_elapsed <= 0:
+                return 0.0
+            
+            # Calculate BPS based on current counts
+            bps = self._last_block_count / time_elapsed
+            
+            # Debug logging
+            logger.debug(f"BPS calculation: {self._last_block_count} blocks in {time_elapsed:.2f}s = {bps:.2f} BPS")
+            
+            # Reset counters after calculation for next measurement window
+            self._last_block_count = 0
+            self._last_check_time = current_time
+            
+            return bps
+        except Exception as e:
+            logger.error(f"Error calculating BPS: {e}")
+            return 0.0
 
     async def collect_snapshot(self) -> SystemSnapshot:
         """Collects a single snapshot of all metrics."""
         mem_used_gb, mem_used_percent = await self._get_memory_usage_gb()
         redis_depths = await self._get_redis_stream_depths()
         ogmios_status = self._get_ogmios_status()
+        bps = self._calculate_blocks_per_second()
 
-        # This is a placeholder for BPS. A real implementation would need to track blocks processed.
-        # For now, we'll leave it at 0.
-        bps = 0.0
-
-        return SystemSnapshot(
+        snapshot = SystemSnapshot(
             memory_used_gb=mem_used_gb,
             memory_used_percent=mem_used_percent,
             redis_streams=redis_depths,
             ogmios_endpoints_status=ogmios_status,
             blocks_per_second=bps,
         )
+        
+        logger.debug(f"Collected metrics snapshot: {snapshot}")
+        return snapshot
 
     async def _monitor_loop(self):
         """The main loop that periodically collects and logs metrics."""
         while True:
             try:
                 snapshot = await self.collect_snapshot()
+                
+                # Format ogmios status for better readability
+                ogmios_status_summary = "No endpoints"
+                if snapshot.ogmios_endpoints_status:
+                    healthy_count = sum(1 for status in snapshot.ogmios_endpoints_status.values() if status.get("is_healthy", False))
+                    total_count = len(snapshot.ogmios_endpoints_status)
+                    ogmios_status_summary = f"{healthy_count}/{total_count} healthy"
+                
                 logger.info(
                     f"Monitoring Snapshot - "
                     f"Memory: {snapshot.memory_used_gb:.2f}GB ({snapshot.memory_used_percent:.1f}%) | "
                     f"Redis Streams: {snapshot.redis_streams} | "
-                    f"Ogmios Endpoints: {len(snapshot.ogmios_endpoints_status)} healthy"
+                    f"Ogmios: {ogmios_status_summary} | "
+                    f"BPS: {snapshot.blocks_per_second:.2f}"
                 )
             except Exception as e:
                 logger.exception(f"Error in monitoring loop: {e}")
