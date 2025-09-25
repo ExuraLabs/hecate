@@ -109,12 +109,13 @@ async def sync_epoch(
         Block.__init__ = fast_block_init
         
         try:
-            # Initialize metrics collector with this client's balancer
+            # Initialize metrics collector with this client's balancer and memory controller
             redis_settings = get_redis_settings()
             metrics_collector = MetricsCollector(
                 redis_url=redis_settings.url,
                 stream_keys=["hecate:history:data_stream", "hecate:history:event_stream"],
-                balancer=client.balancer  # Use the actual client's balancer
+                balancer=client.balancer,  # Use the actual client's balancer
+                memory_controller=mem_controller,  # Include memory controller for integrated monitoring
             )
             
             await metrics_collector.start()
@@ -141,9 +142,10 @@ async def sync_epoch(
 
                 # Adjust batch size based on memory
                 if mem_controller.should_reduce_batch_size():
+                    old_batch_size = current_batch_size
                     current_batch_size = max(min_batch_size, int(current_batch_size / 2))
                     logger.info(
-                        f"Reducing batch size to {current_batch_size} due to memory pressure."
+                        f"Reducing batch size from {old_batch_size} to {current_batch_size} due to memory pressure."
                     )
                 else:
                     current_batch_size = batch_size  # Restore if memory is okay
@@ -335,7 +337,7 @@ async def historical_sync_flow(
             min_batch_size=final_min_batch_size,
             memory_config=unmapped(effective_memory_config),
             backpressure_config=unmapped(effective_backpressure_config),
-            snapshot_frequency=unmapped(final_snapshot_frequency),
+            snapshot_frequency=final_snapshot_frequency
         )
         wait(futures)
 

@@ -5,7 +5,15 @@ from dataclasses import dataclass
 import psutil
 from pydantic import BaseModel
 
-logger = logging.getLogger(__name__)
+
+def _get_logger():
+    """Get the appropriate logger for the current context."""
+    try:
+        from prefect import get_run_logger
+        return get_run_logger()
+    except (ImportError, RuntimeError):
+        # Fallback to standard logging if Prefect is not available or no run context
+        return logging.getLogger(__name__)
 
 
 class AdaptiveMemoryConfig(BaseModel):
@@ -51,6 +59,7 @@ class AdaptiveMemoryController:
             self.config.memory_limit_gb * self.config.emergency_threshold
         )
 
+        logger = _get_logger()
         logger.info(
             f"AdaptiveMemoryController initialized with limit: {self.config.memory_limit_gb:.2f} GB"
         )
@@ -98,6 +107,7 @@ class AdaptiveMemoryController:
         ):
             self._current_state = self._get_current_memory_usage()
             self._last_check_time = now
+                
         return self._current_state
 
     def should_reduce_batch_size(self) -> bool:
@@ -105,23 +115,58 @@ class AdaptiveMemoryController:
         Returns True if memory usage is above the critical threshold.
         """
         state = self.get_memory_state()
-        is_critical = state.used_gb >= self.critical_limit_gb
-        if is_critical:
-            logger.warning(
-                f"Memory usage ({state.used_gb:.2f} GB) has passed the critical threshold "
-                f"({self.critical_limit_gb:.2f} GB). Suggesting batch size reduction."
-            )
-        return is_critical
+        return state.used_gb >= self.critical_limit_gb
 
     def should_pause_processing(self) -> bool:
         """
         Returns True if memory usage is above the emergency threshold.
         """
         state = self.get_memory_state()
-        is_emergency = state.used_gb >= self.emergency_limit_gb
-        if is_emergency:
-            logger.error(
-                f"EMERGENCY: Memory usage ({state.used_gb:.2f} GB) has passed the emergency threshold "
-                f"({self.emergency_limit_gb:.2f} GB). Suggesting immediate pause."
-            )
-        return is_emergency
+        return state.used_gb >= self.emergency_limit_gb
+
+    def get_snapshot_info(self) -> dict:
+        """Get memory controller information for system snapshots."""
+        try:
+            state = self.get_memory_state()
+            memory_pressure = self.should_reduce_batch_size() or self.should_pause_processing()
+            
+            # Determine status based on thresholds
+            if state.used_gb >= self.emergency_limit_gb:
+                memory_status = "EMERGENCY"
+            elif state.used_gb >= self.critical_limit_gb:
+                memory_status = "CRITICAL"
+            elif state.used_gb >= self.warning_limit_gb:
+                memory_status = "WARNING"
+            else:
+                memory_status = "NORMAL"
+                
+            return {
+                "memory_limit_gb": state.total_gb,
+                "memory_available_gb": state.available_gb,
+                "memory_status": memory_status,
+                "memory_pressure": memory_pressure,
+            }
+        except Exception as e:
+            logger = _get_logger()
+            logger.debug(f"Error collecting memory controller info: {e}")
+            return {
+                "memory_limit_gb": None,
+                "memory_available_gb": None,
+                "memory_status": None,
+                "memory_pressure": None,
+            }
+
+    def format_memory_info(self, base_memory_info: str) -> str:
+        """Format memory information for display, including controller status."""
+        try:
+            snapshot_info = self.get_snapshot_info()
+            memory_info = base_memory_info
+            
+            if snapshot_info["memory_status"]:
+                memory_info += f" [{snapshot_info['memory_status']}]"
+            if snapshot_info["memory_pressure"]:
+                memory_info += " PRESSURE!"
+                
+            return memory_info
+        except Exception:
+            return base_memory_info

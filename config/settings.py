@@ -57,9 +57,9 @@ class BatchSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=env_file, env_file_encoding="utf-8", extra="ignore"
     )
-    base_size: int = Field(alias="BASE_BATCH_SIZE", default=200)
+    base_size: int = Field(alias="BASE_BATCH_SIZE", default=500)
     min_size: int = Field(alias="MIN_BATCH_SIZE", default=50)
-    max_size: int = Field(alias="MAX_BATCH_SIZE", default=400)
+    max_size: int = Field(alias="MAX_BATCH_SIZE", default=1000)
 
 
 class MonitoringSettings(BaseSettings):

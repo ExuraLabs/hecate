@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional
 import psutil
 import redis.asyncio as redis
 from client.multi_source_balancer import MultiSourceBalancer
+from flows.adaptive_memory_controller import AdaptiveMemoryController
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,11 @@ class SystemSnapshot:
     redis_streams: Dict[str, int] = field(default_factory=dict)
     ogmios_endpoints_status: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     blocks_per_second: float = 0.0
+    # Memory controller information
+    memory_limit_gb: Optional[float] = None
+    memory_available_gb: Optional[float] = None
+    memory_status: Optional[str] = None  # NORMAL, WARNING, CRITICAL, EMERGENCY
+    memory_pressure: Optional[bool] = None
 
 
 class MetricsCollector:
@@ -30,11 +36,13 @@ class MetricsCollector:
         redis_url: str,
         stream_keys: list[str],
         balancer: Optional[MultiSourceBalancer] = None,
+        memory_controller: Optional[AdaptiveMemoryController] = None,
         interval_seconds: int = 15,
     ):
         self.redis_url = redis_url
         self.stream_keys = stream_keys
         self.balancer = balancer
+        self.memory_controller = memory_controller
         self.interval = interval_seconds
         self.process = psutil.Process()
         self._redis_client: Optional[redis.Redis] = None
@@ -144,12 +152,21 @@ class MetricsCollector:
         ogmios_status = self._get_ogmios_status()
         bps = self._calculate_blocks_per_second()
 
+        # Get memory controller information if available
+        memory_controller_info = {}
+        if self.memory_controller:
+            memory_controller_info = self.memory_controller.get_snapshot_info()
+
         snapshot = SystemSnapshot(
             memory_used_gb=mem_used_gb,
             memory_used_percent=mem_used_percent,
             redis_streams=redis_depths,
             ogmios_endpoints_status=ogmios_status,
             blocks_per_second=bps,
+            memory_limit_gb=memory_controller_info.get("memory_limit_gb"),
+            memory_available_gb=memory_controller_info.get("memory_available_gb"),
+            memory_status=memory_controller_info.get("memory_status"),
+            memory_pressure=memory_controller_info.get("memory_pressure"),
         )
         
         logger.debug(f"Collected metrics snapshot: {snapshot}")
@@ -168,9 +185,16 @@ class MetricsCollector:
                     total_count = len(snapshot.ogmios_endpoints_status)
                     ogmios_status_summary = f"{healthy_count}/{total_count} healthy"
                 
+                # Format memory info using memory controller if available
+                base_memory_info = f"{snapshot.memory_used_gb:.2f}GB ({snapshot.memory_used_percent:.1f}%)"
+                if self.memory_controller:
+                    memory_info = self.memory_controller.format_memory_info(base_memory_info)
+                else:
+                    memory_info = base_memory_info
+                
                 logger.info(
                     f"Monitoring Snapshot - "
-                    f"Memory: {snapshot.memory_used_gb:.2f}GB ({snapshot.memory_used_percent:.1f}%) | "
+                    f"Memory: {memory_info} | "
                     f"Redis Streams: {snapshot.redis_streams} | "
                     f"Ogmios: {ogmios_status_summary} | "
                     f"BPS: {snapshot.blocks_per_second:.2f}"
