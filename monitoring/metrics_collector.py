@@ -21,8 +21,6 @@ class SystemSnapshot:
     redis_streams: Dict[str, int] = field(default_factory=dict)
     ogmios_endpoints_status: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     blocks_per_second: float = 0.0
-    # Memory controller information
-    memory_limit_gb: Optional[float] = None
     memory_available_gb: Optional[float] = None
     memory_status: Optional[str] = None  # NORMAL, WARNING, CRITICAL, EMERGENCY
     memory_pressure: Optional[bool] = None
@@ -98,7 +96,7 @@ class MetricsCollector:
                 str(ep.url): {
                     "is_healthy": ep.is_healthy,
                     "latency_ms": f"{ep.latency_ms:.2f}",
-                    "weight": ep.weight,
+                    "weight": round(ep.weight, 3),
                 }
                 for ep in self.balancer.endpoints
             }
@@ -157,13 +155,22 @@ class MetricsCollector:
         if self.memory_controller:
             memory_controller_info = self.memory_controller.get_snapshot_info()
 
+        # Round float values to 3 decimal places for cleaner display
+        def round_float(value, decimals=3, default=None):
+            """Round float values to specified decimal places, handle None values."""
+            if value is None:
+                return default
+            if isinstance(value, (int, float)):
+                return round(float(value), decimals)
+            return value
+
         snapshot = SystemSnapshot(
             redis_streams=redis_depths,
             ogmios_endpoints_status=ogmios_status,
-            blocks_per_second=bps,
-            memory_used_gb=mem_used_gb,
-            memory_used_percent=mem_used_percent,
-            memory_available_gb=memory_controller_info.get("memory_available_gb"),
+            blocks_per_second=round_float(bps, default=0.0),
+            memory_used_gb=round_float(mem_used_gb, default=0.0),
+            memory_used_percent=round_float(mem_used_percent, default=0.0),
+            memory_available_gb=round_float(memory_controller_info.get("memory_available_gb")),
             memory_status=memory_controller_info.get("memory_status"),
             memory_pressure=memory_controller_info.get("memory_pressure"),
         )

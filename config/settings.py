@@ -32,7 +32,7 @@ class MemorySettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=env_file, env_file_encoding="utf-8", extra="ignore"
     )
-    limit_gb: float = Field(alias="PREFECT_MEMORY_LIMIT_GB", default=24.0)
+    memory_limit_gb: float = Field(alias="PREFECT_MEMORY_LIMIT_GB", default=24.0)
     warning_threshold: float = Field(alias="MEMORY_WARNING_THRESHOLD", default=0.75)
     critical_threshold: float = Field(alias="MEMORY_CRITICAL_THRESHOLD", default=0.85)
     emergency_threshold: float = Field(alias="MEMORY_EMERGENCY_THRESHOLD", default=0.90)
