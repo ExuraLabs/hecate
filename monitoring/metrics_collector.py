@@ -158,12 +158,11 @@ class MetricsCollector:
             memory_controller_info = self.memory_controller.get_snapshot_info()
 
         snapshot = SystemSnapshot(
-            memory_used_gb=mem_used_gb,
-            memory_used_percent=mem_used_percent,
             redis_streams=redis_depths,
             ogmios_endpoints_status=ogmios_status,
             blocks_per_second=bps,
-            memory_limit_gb=memory_controller_info.get("memory_limit_gb"),
+            memory_used_gb=mem_used_gb,
+            memory_used_percent=mem_used_percent,
             memory_available_gb=memory_controller_info.get("memory_available_gb"),
             memory_status=memory_controller_info.get("memory_status"),
             memory_pressure=memory_controller_info.get("memory_pressure"),
