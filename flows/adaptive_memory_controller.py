@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import psutil
 from pydantic import BaseModel
 
+from config.settings import get_memory_settings
+
 
 def _get_logger():
     """Get the appropriate logger for the current context."""
@@ -23,7 +25,7 @@ class AdaptiveMemoryConfig(BaseModel):
     warning_threshold: float = 0.75
     critical_threshold: float = 0.85
     emergency_threshold: float = 0.90
-    check_interval_seconds: int = 10
+    check_interval_seconds: int
 
 
 @dataclass
@@ -43,7 +45,11 @@ class AdaptiveMemoryController:
     """
 
     def __init__(self, config: AdaptiveMemoryConfig | None = None):
-        self.config = config or AdaptiveMemoryConfig()
+        if config is None:
+            memory_settings = get_memory_settings()
+            config = AdaptiveMemoryConfig(**memory_settings.model_dump())
+        
+        self.config = config
         self.process = psutil.Process()
         self._last_check_time: float = 0
         self._current_state: MemoryState | None = None

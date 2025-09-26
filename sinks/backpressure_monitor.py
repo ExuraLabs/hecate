@@ -5,6 +5,9 @@ from typing import Optional
 import redis.asyncio as redis
 from pydantic import BaseModel
 
+from config.settings import get_redis_settings
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -12,7 +15,7 @@ class RedisBackpressureConfig(BaseModel):
     """Configuration for Redis backpressure monitoring."""
 
     max_depth: int = 10_000
-    check_interval: int = 5
+    check_interval: int
 
 
 class RedisBackpressureMonitor:
@@ -28,7 +31,15 @@ class RedisBackpressureMonitor:
     ):
         self.redis = redis_client
         self.stream_key = stream_key
-        self.config = config or RedisBackpressureConfig()
+        
+        if config is None:
+            redis_settings = get_redis_settings()
+            config = RedisBackpressureConfig(
+                max_depth=redis_settings.max_stream_depth,
+                check_interval=redis_settings.check_interval,
+            )
+        
+        self.config = config
         self._is_paused = False
         self._monitoring_task: Optional[asyncio.Task] = None
 

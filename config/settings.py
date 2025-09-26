@@ -36,7 +36,7 @@ class MemorySettings(BaseSettings):
     warning_threshold: float = Field(alias="MEMORY_WARNING_THRESHOLD", default=0.75)
     critical_threshold: float = Field(alias="MEMORY_CRITICAL_THRESHOLD", default=0.85)
     emergency_threshold: float = Field(alias="MEMORY_EMERGENCY_THRESHOLD", default=0.90)
-    check_interval_seconds: int = 10
+    check_interval_seconds: int = Field(alias="MEMORY_CHECK_INTERVAL_SECONDS", default=10)
 
 
 class RedisSettings(BaseSettings):
@@ -48,7 +48,7 @@ class RedisSettings(BaseSettings):
     url: str = Field(alias="REDIS_URL", default="redis://localhost:6379/0")
     max_stream_depth: int = Field(alias="REDIS_MAX_STREAM_DEPTH", default=10000)
     warning_threshold: int = Field(alias="REDIS_WARNING_THRESHOLD", default=7500)
-    check_interval: int = 5
+    check_interval: int = Field(alias="REDIS_CHECK_INTERVAL", default=10)
 
 
 class BatchSettings(BaseSettings):

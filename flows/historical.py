@@ -299,7 +299,9 @@ async def historical_sync_flow(
     )
 
     async with HistoricalRedisSink(
-        start_epoch=start_epoch, backpressure_config=effective_backpressure_config
+        start_epoch=start_epoch,
+        backpressure_config=effective_backpressure_config,
+        redis_settings=redis_settings
     ) as sink:
         last = await sink.get_last_synced_epoch()
 
