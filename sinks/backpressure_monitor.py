@@ -31,14 +31,14 @@ class RedisBackpressureMonitor:
     ):
         self.redis = redis_client
         self.stream_key = stream_key
-        
+
         if config is None:
             redis_settings = get_redis_settings()
             config = RedisBackpressureConfig(
                 max_depth=redis_settings.max_stream_depth,
                 check_interval=redis_settings.check_interval,
             )
-        
+
         self.config = config
         self._is_paused = False
         self._monitoring_task: Optional[asyncio.Task] = None

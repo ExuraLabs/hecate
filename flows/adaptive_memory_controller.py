@@ -12,6 +12,7 @@ def _get_logger():
     """Get the appropriate logger for the current context."""
     try:
         from prefect import get_run_logger
+
         return get_run_logger()
     except (ImportError, RuntimeError):
         # Fallback to standard logging if Prefect is not available or no run context
@@ -48,7 +49,7 @@ class AdaptiveMemoryController:
         if config is None:
             memory_settings = get_memory_settings()
             config = AdaptiveMemoryConfig(**memory_settings.model_dump())
-        
+
         self.config = config
         self.process = psutil.Process()
         self._last_check_time: float = 0
@@ -113,7 +114,7 @@ class AdaptiveMemoryController:
         ):
             self._current_state = self._get_current_memory_usage()
             self._last_check_time = now
-                
+
         return self._current_state
 
     def should_reduce_batch_size(self) -> bool:
@@ -134,8 +135,10 @@ class AdaptiveMemoryController:
         """Get memory controller information for system snapshots."""
         try:
             state = self.get_memory_state()
-            memory_pressure = self.should_reduce_batch_size() or self.should_pause_processing()
-            
+            memory_pressure = (
+                self.should_reduce_batch_size() or self.should_pause_processing()
+            )
+
             # Determine status based on thresholds
             if state.used_gb >= self.emergency_limit_gb:
                 memory_status = "EMERGENCY"
@@ -145,7 +148,7 @@ class AdaptiveMemoryController:
                 memory_status = "WARNING"
             else:
                 memory_status = "NORMAL"
-                
+
             return {
                 "memory_limit_gb": state.total_gb,
                 "memory_available_gb": state.available_gb,
@@ -167,12 +170,12 @@ class AdaptiveMemoryController:
         try:
             snapshot_info = self.get_snapshot_info()
             memory_info = base_memory_info
-            
+
             if snapshot_info["memory_status"]:
                 memory_info += f" [{snapshot_info['memory_status']}]"
             if snapshot_info["memory_pressure"]:
                 memory_info += " PRESSURE!"
-                
+
             return memory_info
         except Exception:
             return base_memory_info

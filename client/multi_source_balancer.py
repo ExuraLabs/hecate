@@ -18,7 +18,9 @@ class OgmiosEndpoint(BaseModel):
     weight: float = Field(
         1.0, description="Weight for load balancing (higher is more preferred)."
     )
-    is_healthy: bool | None = Field(None, description="Current health status of the endpoint.")
+    is_healthy: bool | None = Field(
+        None, description="Current health status of the endpoint."
+    )
     latency_ms: float | None = Field(
         None, description="Last measured latency in milliseconds."
     )
@@ -59,19 +61,23 @@ class MultiSourceBalancer:
 
     async def _run_initial_health_check(self) -> None:
         """Runs a one-off health check for all endpoints and signals completion."""
-        logger.info(f"🔍 Starting initial health check for {len(self.endpoints)} Ogmios endpoints...")
+        logger.info(
+            f"🔍 Starting initial health check for {len(self.endpoints)} Ogmios endpoints..."
+        )
         await self._perform_health_check_cycle()
-        
+
         # Log summary of health check results
         healthy_count = sum(1 for ep in self.endpoints if ep.is_healthy)
         logger.info(
             f"✅ Initial Ogmios endpoint health check complete: "
             f"{healthy_count}/{len(self.endpoints)} endpoints healthy"
         )
-        
+
         if healthy_count == 0:
-            logger.error("⚠️ WARNING: No healthy endpoints found! Check your Ogmios servers.")
-        
+            logger.error(
+                "⚠️ WARNING: No healthy endpoints found! Check your Ogmios servers."
+            )
+
         self._initial_check_done.set()
 
     async def _check_health(
@@ -79,14 +85,18 @@ class MultiSourceBalancer:
     ) -> None:
         """Performs a health check on a single endpoint."""
         # Convert WebSocket URL to HTTP URL and ensure proper formatting
-        http_url = str(endpoint.url).replace("ws://", "http://").replace("wss://", "https://")
+        http_url = (
+            str(endpoint.url).replace("ws://", "http://").replace("wss://", "https://")
+        )
         # Remove trailing slash to avoid double slashes
-        http_url = http_url.rstrip('/')
+        http_url = http_url.rstrip("/")
         health_url = f"{http_url}/health"
-        
+
         try:
             start_time = time.perf_counter()
-            timeout = aiohttp.ClientTimeout(total=10)  # Increased timeout for better reliability
+            timeout = aiohttp.ClientTimeout(
+                total=10
+            )  # Increased timeout for better reliability
             async with session.get(health_url, timeout=timeout) as response:
                 response.raise_for_status()
                 data = await response.json()
@@ -113,12 +123,18 @@ class MultiSourceBalancer:
             # Don't automatically mark as unhealthy for HTTP health check failures
             # The WebSocket might still work (as we've seen with radon)
             endpoint.latency_ms = None
-            logger.warning(f"⚠️ HTTP health check failed for {endpoint.url} (trying {health_url}): {type(e).__name__}: {e}")
-            logger.info(f"🔄 Note: WebSocket connection might still work for {endpoint.url}")
+            logger.warning(
+                f"⚠️ HTTP health check failed for {endpoint.url} (trying {health_url}): {type(e).__name__}: {e}"
+            )
+            logger.info(
+                f"🔄 Note: WebSocket connection might still work for {endpoint.url}"
+            )
         except Exception as e:
             endpoint.is_healthy = False
             endpoint.latency_ms = None
-            logger.exception(f"💥 Unexpected error during health check for {endpoint.url}: {e}")
+            logger.exception(
+                f"💥 Unexpected error during health check for {endpoint.url}: {e}"
+            )
 
     async def _run_health_checks(self) -> None:
         """Periodically runs health checks for all endpoints."""
@@ -138,9 +154,11 @@ class MultiSourceBalancer:
         # CRITICAL: Ensure initial check is ALWAYS completed before returning
         # This guarantees that get_best_endpoint() will have valid health data
         if not self._initial_check_done.is_set():
-            logger.info("Running initial Ogmios health check before starting periodic checks...")
+            logger.info(
+                "Running initial Ogmios health check before starting periodic checks..."
+            )
             await self.run_initial_health_check()
-        
+
         # Only start the periodic task if it's not already running
         if self._health_check_task is None or self._health_check_task.done():
             self._health_check_task = asyncio.create_task(self._run_health_checks())
@@ -167,9 +185,9 @@ class MultiSourceBalancer:
         except asyncio.TimeoutError:
             logger.error("Initial health check timed out after 30 seconds!")
             # Continue anyway, but with a warning
-        
+
         healthy_endpoints = [ep for ep in self.endpoints if ep.is_healthy]
-        
+
         # If no endpoints passed HTTP health check, still try all endpoints
         # because WebSocket might work even if HTTP health check fails
         if not healthy_endpoints:
@@ -179,7 +197,9 @@ class MultiSourceBalancer:
             )
             available_endpoints = self.endpoints
         else:
-            logger.debug(f"Found {len(healthy_endpoints)} healthy endpoints out of {len(self.endpoints)}")
+            logger.debug(
+                f"Found {len(healthy_endpoints)} healthy endpoints out of {len(self.endpoints)}"
+            )
             available_endpoints = healthy_endpoints
 
         # Simple weighted random selection for now.
@@ -195,7 +215,11 @@ class MultiSourceBalancer:
         for endpoint in available_endpoints:
             current_weight += endpoint.weight
             if current_weight >= selection:
-                latency_str = f"{endpoint.latency_ms:.2f}ms" if endpoint.latency_ms is not None else "unknown"
+                latency_str = (
+                    f"{endpoint.latency_ms:.2f}ms"
+                    if endpoint.latency_ms is not None
+                    else "unknown"
+                )
                 logger.debug(
                     f"Selected Ogmios endpoint: {endpoint.url} "
                     f"(healthy: {endpoint.is_healthy}, latency: {latency_str}, weight: {endpoint.weight})"
@@ -204,5 +228,7 @@ class MultiSourceBalancer:
 
         # Fallback in case of floating point inaccuracies
         fallback = random.choice(available_endpoints)
-        logger.debug(f"Using fallback endpoint due to floating point precision: {fallback.url}")
+        logger.debug(
+            f"Using fallback endpoint due to floating point precision: {fallback.url}"
+        )
         return fallback

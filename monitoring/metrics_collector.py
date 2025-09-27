@@ -86,16 +86,18 @@ class MetricsCollector:
         if not self.balancer:
             logger.debug("No balancer available for ogmios status")
             return {}
-        
-        if not hasattr(self.balancer, 'endpoints') or not self.balancer.endpoints:
+
+        if not hasattr(self.balancer, "endpoints") or not self.balancer.endpoints:
             logger.debug("No endpoints found in balancer")
             return {}
-            
+
         try:
             status = {
                 str(ep.url): {
                     "is_healthy": ep.is_healthy,
-                    "latency_ms": f"{ep.latency_ms:.2f}" if ep.latency_ms is not None else "unknown",
+                    "latency_ms": f"{ep.latency_ms:.2f}"
+                    if ep.latency_ms is not None
+                    else "unknown",
                     "weight": round(ep.weight, 3),
                 }
                 for ep in self.balancer.endpoints
@@ -116,24 +118,24 @@ class MetricsCollector:
     def _calculate_blocks_per_second(self) -> float:
         """Calculate blocks per second based on recent processing."""
         current_time = time.time()
-        
+
         # If no blocks have been processed yet, return 0
         if self._last_check_time == 0 or self._last_block_count == 0:
             return 0.0
-            
+
         time_elapsed = current_time - self._last_check_time
-        
+
         # If no time has elapsed, return 0
         if time_elapsed <= 0:
             return 0.0
-        
+
         # Calculate BPS based on current counts
         bps = self._last_block_count / time_elapsed
-        
+
         # Reset counters after calculation for next measurement window
         self._last_block_count = 0
         self._last_check_time = current_time
-        
+
         return bps
 
     async def collect_snapshot(self) -> SystemSnapshot:
@@ -163,11 +165,13 @@ class MetricsCollector:
             blocks_per_second=round_float(bps, default=0.0),
             memory_used_gb=round_float(mem_used_gb, default=0.0),
             memory_used_percent=round_float(mem_used_percent, default=0.0),
-            memory_available_gb=round_float(memory_controller_info.get("memory_available_gb")),
+            memory_available_gb=round_float(
+                memory_controller_info.get("memory_available_gb")
+            ),
             memory_status=memory_controller_info.get("memory_status"),
             memory_pressure=memory_controller_info.get("memory_pressure"),
         )
-        
+
         logger.debug(f"Collected metrics snapshot: {snapshot}")
         return snapshot
 
@@ -176,21 +180,27 @@ class MetricsCollector:
         while True:
             try:
                 snapshot = await self.collect_snapshot()
-                
+
                 # Format ogmios status for better readability
                 ogmios_status_summary = "No endpoints"
                 if snapshot.ogmios_endpoints_status:
-                    healthy_count = sum(1 for status in snapshot.ogmios_endpoints_status.values() if status.get("is_healthy", False))
+                    healthy_count = sum(
+                        1
+                        for status in snapshot.ogmios_endpoints_status.values()
+                        if status.get("is_healthy", False)
+                    )
                     total_count = len(snapshot.ogmios_endpoints_status)
                     ogmios_status_summary = f"{healthy_count}/{total_count} healthy"
-                
+
                 # Format memory info using memory controller if available
                 base_memory_info = f"{snapshot.memory_used_gb:.2f}GB ({snapshot.memory_used_percent:.1f}%)"
                 if self.memory_controller:
-                    memory_info = self.memory_controller.format_memory_info(base_memory_info)
+                    memory_info = self.memory_controller.format_memory_info(
+                        base_memory_info
+                    )
                 else:
                     memory_info = base_memory_info
-                
+
                 logger.info(
                     f"Monitoring Snapshot - "
                     f"Memory: {memory_info} | "

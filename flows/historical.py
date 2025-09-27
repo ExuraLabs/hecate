@@ -107,31 +107,34 @@ async def sync_epoch(
         # Apply the fast block initialization optimization for this context
         original_block_init = Block.__init__
         Block.__init__ = fast_block_init
-        
+
         try:
             # Initialize metrics collector with this client's balancer and memory controller
             redis_settings = get_redis_settings()
             metrics_collector = MetricsCollector(
                 redis_url=redis_settings.url,
-                stream_keys=["hecate:history:data_stream", "hecate:history:event_stream"],
+                stream_keys=[
+                    "hecate:history:data_stream",
+                    "hecate:history:event_stream",
+                ],
                 balancer=client.balancer,  # Use the actual client's balancer
                 memory_controller=mem_controller,  # Include memory controller for integrated monitoring
             )
-            
+
             await metrics_collector.start()
             logger.debug(f"MetricsCollector started for epoch {epoch}")
-            
+
             start_height = await sink.get_epoch_resume_height(epoch) or None
 
             batches_sent = 0
             batch: list[Block] = []
             last_height: BlockHeight | int = -1
             blocks_processed_in_epoch = 0
-            
+
             # Get an initial snapshot for this epoch
             initial_snapshot = await metrics_collector.collect_snapshot()
             logger.info(f"Epoch {epoch} start snapshot: {initial_snapshot}")
-                
+
             async for blocks in client.epoch_blocks(epoch):
                 # Emergency pause if memory is critical
                 if mem_controller.should_pause_processing():
@@ -143,7 +146,9 @@ async def sync_epoch(
                 # Adjust batch size based on memory
                 if mem_controller.should_reduce_batch_size():
                     old_batch_size = current_batch_size
-                    current_batch_size = max(min_batch_size, int(current_batch_size / 2))
+                    current_batch_size = max(
+                        min_batch_size, int(current_batch_size / 2)
+                    )
                     logger.info(
                         f"Reducing batch size from {old_batch_size} to {current_batch_size} due to memory pressure."
                     )
@@ -156,7 +161,7 @@ async def sync_epoch(
                         continue
                     batch.append(blk)
                     blocks_processed_in_epoch += 1
-                    
+
                     if len(batch) < current_batch_size:
                         continue
                     # send batch to sink
@@ -168,12 +173,14 @@ async def sync_epoch(
 
                     # Update metrics with blocks processed
                     metrics_collector.update_block_count(len(batch))
-                    
+
                     # Collect snapshots based on configured frequency
                     if batches_sent == 1 or batches_sent % snapshot_frequency == 0:
                         await asyncio.sleep(0.1)  # Small delay for timing
                         snapshot = await metrics_collector.collect_snapshot()
-                        logger.info(f"Epoch {epoch} batch {batches_sent} snapshot: {snapshot}")
+                        logger.info(
+                            f"Epoch {epoch} batch {batches_sent} snapshot: {snapshot}"
+                        )
 
                     logger.debug(
                         f"Epoch {epoch} Batch #{batches_sent}: sent {len(batch)} blocks "
@@ -194,18 +201,22 @@ async def sync_epoch(
 
                 # Always show snapshot for final batch since it's important
                 snapshot = await metrics_collector.collect_snapshot()
-                logger.info(f"Epoch {epoch} final batch {batches_sent} processing snapshot: {snapshot}")
+                logger.info(
+                    f"Epoch {epoch} final batch {batches_sent} processing snapshot: {snapshot}"
+                )
 
                 logger.debug(
                     f"Epoch {epoch} Final batch #{batches_sent}: sent {len(batch)} blocks "
                     f"in {batch_end - batch_start:.2f}s"
                 )
                 batch.clear()
-                
+
             # Get final epoch summary snapshot after all processing is done
             # This will show 0 BPS since no recent processing, but good for final state
-            logger.info(f"Epoch {epoch} completed. Total blocks processed: {blocks_processed_in_epoch}")
-                
+            logger.info(
+                f"Epoch {epoch} completed. Total blocks processed: {blocks_processed_in_epoch}"
+            )
+
             # mark done and advance last_synced_epoch
             new_last = await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
         except Exception as e:
@@ -214,13 +225,15 @@ async def sync_epoch(
         finally:
             # Restore original Block.__init__
             Block.__init__ = original_block_init
-            
+
             # Clean up metrics collector
             try:
                 await metrics_collector.stop()
                 logger.debug(f"MetricsCollector stopped for epoch {epoch}")
             except Exception as e:
-                logger.warning(f"Error stopping metrics collector for epoch {epoch}: {e}")
+                logger.warning(
+                    f"Error stopping metrics collector for epoch {epoch}: {e}"
+                )
 
     epoch_end = time.perf_counter()
     logger.debug(
@@ -286,7 +299,9 @@ async def historical_sync_flow(
     final_batch_size = batch_size or batch_settings.base_size
     final_min_batch_size = min_batch_size or batch_settings.min_size
     final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers
-    final_snapshot_frequency = snapshot_frequency or monitoring_settings.snapshot_frequency
+    final_snapshot_frequency = (
+        snapshot_frequency or monitoring_settings.snapshot_frequency
+    )
 
     effective_memory_config = memory_config or AdaptiveMemoryConfig(
         **get_memory_settings().model_dump()
@@ -301,7 +316,7 @@ async def historical_sync_flow(
     async with HistoricalRedisSink(
         start_epoch=start_epoch,
         backpressure_config=effective_backpressure_config,
-        redis_settings=redis_settings
+        redis_settings=redis_settings,
     ) as sink:
         last = await sink.get_last_synced_epoch()
 
@@ -339,7 +354,7 @@ async def historical_sync_flow(
             min_batch_size=final_min_batch_size,
             memory_config=unmapped(effective_memory_config),
             backpressure_config=unmapped(effective_backpressure_config),
-            snapshot_frequency=final_snapshot_frequency
+            snapshot_frequency=final_snapshot_frequency,
         )
         wait(futures)
 

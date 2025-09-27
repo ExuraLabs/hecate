@@ -74,7 +74,9 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         for attempt in range(max_attempts):
             try:
                 endpoint = await self.balancer.get_best_endpoint()
-                print(f"Attempting connection {attempt + 1}/{max_attempts} to Ogmios at {endpoint.url}")                
+                print(
+                    f"Attempting connection {attempt + 1}/{max_attempts} to Ogmios at {endpoint.url}"
+                )
                 self.connection = await connect(str(endpoint.url), **connection_params)
                 print(f"Successfully connected to {endpoint.url}")
                 if not endpoint.is_healthy:
@@ -82,7 +84,9 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
                 return
 
             except OSError as e:
-                print(f"Connection attempt {attempt + 1} failed for {endpoint.url}: {type(e).__name__}")
+                print(
+                    f"Connection attempt {attempt + 1} failed for {endpoint.url}: {type(e).__name__}"
+                )
                 endpoint.is_healthy = False
                 if attempt < max_attempts - 1:
                     print("Trying next available endpoint...")

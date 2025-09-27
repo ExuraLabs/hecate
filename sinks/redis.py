@@ -203,6 +203,7 @@ class HistoricalRedisSink(DataSink):
         # Store settings for use in __aenter__
         if redis_settings is None:
             from config.settings import get_redis_settings
+
             redis_settings = get_redis_settings()
         self._redis_settings = redis_settings
 
@@ -210,14 +211,14 @@ class HistoricalRedisSink(DataSink):
         self._advance_sha: str | None = None
         self.logger = get_run_logger()
         self.backpressure_monitor: RedisBackpressureMonitor | None = None
-        
+
         # Initialize backpressure config using Redis settings if not provided
         if backpressure_config is None:
             backpressure_config = RedisBackpressureConfig(
                 max_depth=self._redis_settings.max_stream_depth,
                 check_interval=self._redis_settings.check_interval,
             )
-        
+
         self.backpressure_config = backpressure_config
         self.prefix = prefix
 
@@ -254,7 +255,7 @@ class HistoricalRedisSink(DataSink):
         self._advance_sha: str | None = None
         self.logger = get_run_logger()
         self.backpressure_monitor: RedisBackpressureMonitor | None = None
-        
+
         self.backpressure_config = backpressure_config
 
     async def __aenter__(self):

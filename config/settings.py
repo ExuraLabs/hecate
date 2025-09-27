@@ -1,12 +1,19 @@
 import json
 from functools import lru_cache
-from typing import List, Dict, Any
+from typing import TypedDict
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 env_file = ".env.production"  # ".env.production"
+
+
+class OgmiosEndpointConfig(TypedDict):
+    """Type definition for Ogmios endpoint configuration."""
+    url: str
+    weight: float
+
 
 class GeneralSettings(BaseSettings):
     """General application settings."""
@@ -36,7 +43,9 @@ class MemorySettings(BaseSettings):
     warning_threshold: float = Field(alias="MEMORY_WARNING_THRESHOLD", default=0.75)
     critical_threshold: float = Field(alias="MEMORY_CRITICAL_THRESHOLD", default=0.85)
     emergency_threshold: float = Field(alias="MEMORY_EMERGENCY_THRESHOLD", default=0.90)
-    check_interval_seconds: int = Field(alias="MEMORY_CHECK_INTERVAL_SECONDS", default=10)
+    check_interval_seconds: int = Field(
+        alias="MEMORY_CHECK_INTERVAL_SECONDS", default=10
+    )
 
 
 class RedisSettings(BaseSettings):
@@ -83,8 +92,16 @@ class OgmiosSettings(BaseSettings):
     )
 
     @property
-    def endpoints(self) -> List[Dict[str, Any]]:
-        return json.loads(self.endpoints_str)
+    def endpoints(self) -> list[OgmiosEndpointConfig]:
+        """
+        Parse the JSON string and return a list of endpoint configurations.
+        
+        Returns:
+            list[OgmiosEndpointConfig]: List of endpoint configurations with 
+                url (str) and weight (float) fields.
+        """
+        parsed_endpoints: list[OgmiosEndpointConfig] = json.loads(self.endpoints_str)
+        return parsed_endpoints
 
 
 @lru_cache
@@ -119,8 +136,14 @@ def get_ogmios_settings() -> OgmiosSettings:
     return OgmiosSettings()
 
 
-# Load all settings at startup
-def load_all_settings():
+# Load all settings at startup to ensure they're cached
+def load_all_settings() -> None:
+    """
+    Preload all settings to populate the LRU cache.
+    
+    This ensures that settings are loaded once at startup rather than 
+    on first access, which can help with consistency and performance.
+    """
     get_dask_settings()
     get_memory_settings()
     get_redis_settings()
