@@ -2,7 +2,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional
+from typing import Any
 
 import psutil
 import redis.asyncio as redis
@@ -18,12 +18,12 @@ class SystemSnapshot:
 
     memory_used_gb: float
     memory_used_percent: float
-    redis_streams: Dict[str, int] = field(default_factory=dict)
-    ogmios_endpoints_status: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    redis_streams: dict[str, int] = field(default_factory=dict)
+    ogmios_endpoints_status: dict[str, dict[str, Any]] = field(default_factory=dict)
     blocks_per_second: float = 0.0
-    memory_available_gb: Optional[float] = None
-    memory_status: Optional[str] = None  # NORMAL, WARNING, CRITICAL, EMERGENCY
-    memory_pressure: Optional[bool] = None
+    memory_available_gb: float | None = None
+    memory_status: str | None = None  # NORMAL, WARNING, CRITICAL, EMERGENCY
+    memory_pressure: bool | None = None
 
 
 class MetricsCollector:
@@ -33,8 +33,8 @@ class MetricsCollector:
         self,
         redis_url: str,
         stream_keys: list[str],
-        balancer: Optional[MultiSourceBalancer] = None,
-        memory_controller: Optional[AdaptiveMemoryController] = None,
+        balancer: MultiSourceBalancer | None = None,
+        memory_controller: AdaptiveMemoryController | None = None,
         interval_seconds: int = 15,
     ):
         self.redis_url = redis_url
@@ -43,8 +43,8 @@ class MetricsCollector:
         self.memory_controller = memory_controller
         self.interval = interval_seconds
         self.process = psutil.Process()
-        self._redis_client: Optional[redis.Redis] = None
-        self._monitoring_task: Optional[asyncio.Task] = None
+        self._redis_client: redis.Redis | None = None
+        self._monitoring_task: asyncio.Task | None = None
 
         # For BPS calculation
         self._last_block_count = 0
@@ -69,7 +69,7 @@ class MetricsCollector:
             logger.error(f"Failed to get memory usage: {e}")
             return 0.0, 0.0
 
-    async def _get_redis_stream_depths(self) -> Dict[str, int]:
+    async def _get_redis_stream_depths(self) -> dict[str, int]:
         """Gets the length of specified Redis streams."""
         if not self._redis_client:
             return {}
@@ -81,7 +81,7 @@ class MetricsCollector:
             logger.error(f"Failed to get Redis stream depths: {e}")
         return depths
 
-    def _get_ogmios_status(self) -> Dict[str, Dict[str, Any]]:
+    def _get_ogmios_status(self) -> dict[str, dict[str, Any]]:
         """Gets the status of Ogmios endpoints from the balancer."""
         if not self.balancer:
             logger.debug("No balancer available for ogmios status")
@@ -95,7 +95,7 @@ class MetricsCollector:
             status = {
                 str(ep.url): {
                     "is_healthy": ep.is_healthy,
-                    "latency_ms": f"{ep.latency_ms:.2f}",
+                    "latency_ms": f"{ep.latency_ms:.2f}" if ep.latency_ms is not None else "unknown",
                     "weight": round(ep.weight, 3),
                 }
                 for ep in self.balancer.endpoints
@@ -115,33 +115,26 @@ class MetricsCollector:
 
     def _calculate_blocks_per_second(self) -> float:
         """Calculate blocks per second based on recent processing."""
-        try:
-            current_time = time.time()
-            
-            # If no blocks have been processed yet, return 0
-            if self._last_check_time == 0 or self._last_block_count == 0:
-                return 0.0
-                
-            time_elapsed = current_time - self._last_check_time
-            
-            # If no time has elapsed, return 0
-            if time_elapsed <= 0:
-                return 0.0
-            
-            # Calculate BPS based on current counts
-            bps = self._last_block_count / time_elapsed
-            
-            # Debug logging
-            logger.debug(f"BPS calculation: {self._last_block_count} blocks in {time_elapsed:.2f}s = {bps:.2f} BPS")
-            
-            # Reset counters after calculation for next measurement window
-            self._last_block_count = 0
-            self._last_check_time = current_time
-            
-            return bps
-        except Exception as e:
-            logger.error(f"Error calculating BPS: {e}")
+        current_time = time.time()
+        
+        # If no blocks have been processed yet, return 0
+        if self._last_check_time == 0 or self._last_block_count == 0:
             return 0.0
+            
+        time_elapsed = current_time - self._last_check_time
+        
+        # If no time has elapsed, return 0
+        if time_elapsed <= 0:
+            return 0.0
+        
+        # Calculate BPS based on current counts
+        bps = self._last_block_count / time_elapsed
+        
+        # Reset counters after calculation for next measurement window
+        self._last_block_count = 0
+        self._last_check_time = current_time
+        
+        return bps
 
     async def collect_snapshot(self) -> SystemSnapshot:
         """Collects a single snapshot of all metrics."""

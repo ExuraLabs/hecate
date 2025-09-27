@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import random
-from typing import List, Optional
+import time
 
 import aiohttp
 from pydantic import BaseModel, Field, WebsocketUrl
@@ -18,9 +18,9 @@ class OgmiosEndpoint(BaseModel):
     weight: float = Field(
         1.0, description="Weight for load balancing (higher is more preferred)."
     )
-    is_healthy: bool = Field(True, description="Current health status of the endpoint.")
-    latency_ms: float = Field(
-        -1.0, description="Last measured latency in milliseconds."
+    is_healthy: bool | None = Field(None, description="Current health status of the endpoint.")
+    latency_ms: float | None = Field(
+        None, description="Last measured latency in milliseconds."
     )
 
 
@@ -31,14 +31,14 @@ class MultiSourceBalancer:
 
     def __init__(
         self,
-        endpoints: List[OgmiosEndpoint],
+        endpoints: list[OgmiosEndpoint],
         health_check_interval: int = 60,
     ):
         if not endpoints:
             raise ValueError("At least one Ogmios endpoint must be provided.")
         self.endpoints = endpoints
         self.health_check_interval = health_check_interval
-        self._health_check_task: Optional[asyncio.Task] = None
+        self._health_check_task: asyncio.Task | None = None
         self._initial_check_done = asyncio.Event()
 
     @classmethod
@@ -85,14 +85,14 @@ class MultiSourceBalancer:
         health_url = f"{http_url}/health"
         
         try:
-            start_time = asyncio.get_event_loop().time()
+            start_time = time.perf_counter()
             timeout = aiohttp.ClientTimeout(total=10)  # Increased timeout for better reliability
             async with session.get(health_url, timeout=timeout) as response:
                 response.raise_for_status()
                 data = await response.json()
                 network_sync = data.get("networkSynchronization", 0)
                 is_healthy = network_sync > 0.99
-                end_time = asyncio.get_event_loop().time()
+                end_time = time.perf_counter()
 
                 if is_healthy:
                     endpoint.is_healthy = True
@@ -103,7 +103,7 @@ class MultiSourceBalancer:
                     )
                 else:
                     endpoint.is_healthy = False
-                    endpoint.latency_ms = -1.0
+                    endpoint.latency_ms = None
                     logger.warning(
                         f"⚠️ Endpoint {endpoint.url} is unhealthy "
                         f"(sync: {network_sync:.4f} < 0.99 required)"
@@ -112,12 +112,12 @@ class MultiSourceBalancer:
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             # Don't automatically mark as unhealthy for HTTP health check failures
             # The WebSocket might still work (as we've seen with radon)
-            endpoint.latency_ms = -1.0
+            endpoint.latency_ms = None
             logger.warning(f"⚠️ HTTP health check failed for {endpoint.url} (trying {health_url}): {type(e).__name__}: {e}")
             logger.info(f"🔄 Note: WebSocket connection might still work for {endpoint.url}")
         except Exception as e:
             endpoint.is_healthy = False
-            endpoint.latency_ms = -1.0
+            endpoint.latency_ms = None
             logger.exception(f"💥 Unexpected error during health check for {endpoint.url}: {e}")
 
     async def _run_health_checks(self) -> None:
@@ -195,9 +195,10 @@ class MultiSourceBalancer:
         for endpoint in available_endpoints:
             current_weight += endpoint.weight
             if current_weight >= selection:
+                latency_str = f"{endpoint.latency_ms:.2f}ms" if endpoint.latency_ms is not None else "unknown"
                 logger.debug(
                     f"Selected Ogmios endpoint: {endpoint.url} "
-                    f"(healthy: {endpoint.is_healthy}, latency: {endpoint.latency_ms:.2f}ms, weight: {endpoint.weight})"
+                    f"(healthy: {endpoint.is_healthy}, latency: {latency_str}, weight: {endpoint.weight})"
                 )
                 return endpoint
 
