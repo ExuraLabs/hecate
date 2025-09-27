@@ -1,14 +1,18 @@
 import importlib
-import os
 from typing import Any
 
 import orjson as json
 from ogmios import Block
 from prefect import get_run_logger
 
+from config.settings import RedisSettings
 from constants import FIRST_SHELLEY_EPOCH
 from models import BlockHeight, EpochNumber
 from sinks.base import DataSink
+from sinks.backpressure_monitor import (
+    RedisBackpressureConfig,
+    RedisBackpressureMonitor,
+)
 
 _redis_module = importlib.import_module("redis.asyncio")
 aioredis = _redis_module
@@ -162,7 +166,59 @@ class HistoricalRedisSink(DataSink):
         prefix: str = "hecate:history:",
         max_data_batches: int = 10000,
         max_event_entries: int = 10000,
+        backpressure_config: RedisBackpressureConfig | None = None,
+        redis_settings: RedisSettings | None = None,
     ):
+        self.prefix = prefix
+
+        # Stream of block‐batch payloads:
+        #   • Entries: {"type":"batch", "epoch":<int>, "data":<orjson bytes>}
+        #   • Trimmed to the most recent `max_data_batches` batches.
+        self.data_stream = f"{prefix}data_stream"
+
+        # Stream of audit/control events:
+        #   • Entries: {"type":"batch_sent"|"epoch_complete"|"…", "epoch":<int>, …}
+        #   • Trimmed to the most recent `max_event_entries` events.
+        self.event_stream = f"{prefix}event_stream"
+
+        # Hash (Structure) of in‐progress epochs' resume positions:
+        #   • Field = epoch_number (as string)
+        #   • Value = last_processed_block_height (int)
+        #   • Used so that send_batch can resume mid‐epoch on retry.
+        self.resume_map = f"{prefix}resume_map"
+
+        # Set of epochs that have been fully processed by a worker,
+        # but are waiting for all earlier epochs to complete before
+        # advancing `last_synced_epoch`.
+        self.ready_set = f"{prefix}ready_set"
+
+        # String value of the highest epoch N such that *all* epochs
+        # from start through N have been successfully marked complete and synchronized.
+        self.last_synced_epoch = f"{prefix}last_synced_epoch"
+
+        self.start_epoch = start_epoch
+        self.max_data_batches = max_data_batches
+        self.max_event_entries = max_event_entries
+
+        # Store settings for use in __aenter__
+        if redis_settings is None:
+            from config.settings import get_redis_settings
+            redis_settings = get_redis_settings()
+        self._redis_settings = redis_settings
+
+        self.redis: aioredis.Redis | None = None  # type: ignore
+        self._advance_sha: str | None = None
+        self.logger = get_run_logger()
+        self.backpressure_monitor: RedisBackpressureMonitor | None = None
+        
+        # Initialize backpressure config using Redis settings if not provided
+        if backpressure_config is None:
+            backpressure_config = RedisBackpressureConfig(
+                max_depth=self._redis_settings.max_stream_depth,
+                check_interval=self._redis_settings.check_interval,
+            )
+        
+        self.backpressure_config = backpressure_config
         self.prefix = prefix
 
         # Stream of block‐batch payloads:
@@ -197,11 +253,24 @@ class HistoricalRedisSink(DataSink):
         self.redis: aioredis.Redis | None = None  # type: ignore
         self._advance_sha: str | None = None
         self.logger = get_run_logger()
+        self.backpressure_monitor: RedisBackpressureMonitor | None = None
+        
+        self.backpressure_config = backpressure_config
 
     async def __aenter__(self):
-        url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        url = self._redis_settings.url
         self.redis = aioredis.from_url(url, decode_responses=False)
         self.logger.debug(f"🔗 Connecting to Redis at {url}")
+
+        # Initialize and start backpressure monitor
+        self.backpressure_monitor = RedisBackpressureMonitor(
+            redis_client=self.redis,
+            stream_key=self.data_stream,
+            config=self.backpressure_config,
+        )
+        self.backpressure_monitor.start()
+        self.logger.debug("✅ Backpressure monitor started")
+
         # load our Lua once
         self._advance_sha = await self.redis.script_load(_ADVANCE_EPOCH_LUA)
         self.logger.debug("✅ loaded Lua advance script")
@@ -210,12 +279,20 @@ class HistoricalRedisSink(DataSink):
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        if self.backpressure_monitor:
+            await self.backpressure_monitor.stop()
+            self.logger.debug("🛑 Backpressure monitor stopped")
         if self.redis:
             await self.redis.close()
             self.logger.debug("🛑 Redis connection closed")
 
     async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:
         assert self.redis, "Not initialized"
+        assert self.backpressure_monitor, "Backpressure monitor not initialized"
+
+        # Wait if backpressure is active
+        await self.backpressure_monitor.wait_if_paused()
+
         epoch = kwargs.pop("epoch")
         last_height = blocks[-1].height
 
