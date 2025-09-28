@@ -115,9 +115,7 @@ async def metrics_collection_flow() -> None:
     while True:
         try:
             await collect_and_publish_metrics()
-            await asyncio.sleep(
-                monitoring_settings.collection_interval
-            )  # Collect every configured seconds
+            await asyncio.sleep(monitoring_settings.snapshot_frequency)
         except (redis.exceptions.RedisError, psutil.Error) as e:
             logger.error(f"Error in metrics collection: {e}")
             await asyncio.sleep(60)  # Backoff in case of error
