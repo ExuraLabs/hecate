@@ -15,15 +15,11 @@ from sinks.redis import HistoricalRedisSink
 
 from flows import get_system_checkpoint
 from models import EpochNumber
-from flows.adaptive_memory_controller import (
-    AdaptiveMemoryConfig,
-)
-from sinks.backpressure_monitor import RedisBackpressureConfig
+from flows.adaptive_memory_controller import AdaptiveMemoryConfig  # Legacy, remove usage below
+from sinks.backpressure_monitor import RedisBackpressureConfig  # Legacy, remove usage below
 from config.settings import (
     get_batch_settings,
     get_dask_settings,
-    get_memory_settings,
-    get_monitoring_settings,
     get_redis_settings,
 )
 
@@ -62,11 +58,7 @@ def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
 )
 async def sync_epoch(
     epoch: EpochNumber,
-    batch_size: int,
-    min_batch_size: int,
-    memory_config: AdaptiveMemoryConfig,
-    backpressure_config: RedisBackpressureConfig,
-    snapshot_frequency: int,
+    batch_size: int = 1000,
 ) -> EpochNumber:
     """
     Synchronize a specific epoch by fetching blocks of data in batches and relaying them.
@@ -95,50 +87,35 @@ async def sync_epoch(
 
     async with (
         HecateClient() as client,
-        HistoricalRedisSink(backpressure_config=backpressure_config) as sink,
+        HistoricalRedisSink() as sink,
     ):
         original_block_init = Block.__init__
         Block.__init__ = fast_block_init
         try:
-            start_height = await sink.get_epoch_resume_height(epoch) or None
+
+            resume_height = await sink.get_epoch_resume_height(epoch)
             batch: list[Block] = []
-            last_height: BlockHeight | int = -1
-            blocks_processed_in_epoch = 0
+            blocks_processed = 0
 
             async for blocks in client.epoch_blocks(epoch):
-                for blk in blocks:
-                    if start_height and blk.height <= start_height:
+                for block in blocks:
+                    if resume_height and block.height <= resume_height:
                         continue
-                    batch.append(blk)
-                    blocks_processed_in_epoch += 1
+                    batch.append(block)
                     if len(batch) >= batch_size:
-                        batch_start = time.perf_counter()
                         await sink.send_batch(batch, epoch=epoch)
-                        batch_end = time.perf_counter()
-                        last_height = batch[-1].height
-                        logger.debug(
-                            f"Epoch {epoch} Batch: sent {len(batch)} blocks in {batch_end - batch_start:.2f}s"
-                        )
+                        blocks_processed += len(batch)
+                        logger.debug(f"📦 Sent batch of {len(batch)} blocks")
                         batch.clear()
 
-            # Finalizar batch parcial si existe
             if batch:
-                batch_start = time.perf_counter()
                 await sink.send_batch(batch, epoch=epoch)
-                batch_end = time.perf_counter()
-                last_height = batch[-1].height
-                logger.debug(
-                    f"Epoch {epoch} Final batch: sent {len(batch)} blocks in {batch_end - batch_start:.2f}s"
-                )
-                batch.clear()
+                blocks_processed += len(batch)
+                logger.debug(f"📦 Sent final batch of {len(batch)} blocks")
 
-            logger.info(
-                f"Epoch {epoch} completed. Total blocks processed: {blocks_processed_in_epoch}"
-            )
-            new_last = await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
-        except Exception as e:
-            logger.error(f"Error syncing epoch {epoch}: {e}")
-            raise
+            await sink.mark_epoch_complete(epoch)
+            logger.info(f"✅ Epoch {epoch} completed: {blocks_processed} blocks processed")
+            return epoch
         finally:
             Block.__init__ = original_block_init
 
@@ -201,17 +178,8 @@ async def historical_sync_flow(
 
     # Load settings from centralized config if not provided explicitly
     batch_settings = get_batch_settings()
-    monitoring_settings = get_monitoring_settings()
     final_batch_size = batch_size or batch_settings.base_size
-    final_min_batch_size = min_batch_size or batch_settings.min_size
     final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers
-    final_snapshot_frequency = (
-        snapshot_frequency or monitoring_settings.snapshot_frequency
-    )
-
-    effective_memory_config = memory_config or AdaptiveMemoryConfig(
-        **get_memory_settings().model_dump()
-    )
 
     redis_settings = get_redis_settings()
     effective_backpressure_config = backpressure_config or RedisBackpressureConfig(
@@ -257,10 +225,6 @@ async def historical_sync_flow(
         futures = sync_epoch.map(
             epoch=batch_epochs,
             batch_size=final_batch_size,
-            min_batch_size=final_min_batch_size,
-            memory_config=unmapped(effective_memory_config),
-            backpressure_config=unmapped(effective_backpressure_config),
-            snapshot_frequency=final_snapshot_frequency,
         )
         wait(futures)
 
