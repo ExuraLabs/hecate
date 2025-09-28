@@ -70,14 +70,6 @@ async def sync_epoch(
     :type epoch: EpochNumber
     :param batch_size: The number of blocks to process in each batch.
     :type batch_size: int
-    :param min_batch_size: The minimum batch size to use when memory is constrained.
-    :type min_batch_size: int
-    :param memory_config: Configuration for the adaptive memory controller.
-    :type memory_config: AdaptiveMemoryConfig
-    :param backpressure_config: Configuration for the Redis backpressure monitor.
-    :type backpressure_config: RedisBackpressureConfig
-    :param snapshot_frequency: How often to take snapshots (every N batches).
-    :type snapshot_frequency: int
     :return: The updated epoch number indicating the last successfully synced epoch.
     :rtype: EpochNumber
     """
@@ -92,38 +84,45 @@ async def sync_epoch(
         original_block_init = Block.__init__
         Block.__init__ = fast_block_init
         try:
-
             resume_height = await sink.get_epoch_resume_height(epoch)
             batch: list[Block] = []
             blocks_processed = 0
+            last_height: int | None = None
 
             async for blocks in client.epoch_blocks(epoch):
                 for block in blocks:
                     if resume_height and block.height <= resume_height:
                         continue
                     batch.append(block)
+                    last_height = block.height
                     if len(batch) >= batch_size:
                         await sink.send_batch(batch, epoch=epoch)
                         blocks_processed += len(batch)
-                        logger.debug(f"📦 Sent batch of {len(batch)} blocks")
+                        logger.debug(f"Sent batch of {len(batch)} blocks")
                         batch.clear()
 
             if batch:
                 await sink.send_batch(batch, epoch=epoch)
                 blocks_processed += len(batch)
-                logger.debug(f"📦 Sent final batch of {len(batch)} blocks")
+                logger.debug(f"Sent final batch of {len(batch)} blocks")
+                if batch:
+                    last_height = batch[-1].height
 
-            await sink.mark_epoch_complete(epoch)
+            if last_height is None:
+                logger.warning(f"No blocks processed for epoch {epoch}, cannot mark complete.")
+                return epoch
+            await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
             logger.info(f"✅ Epoch {epoch} completed: {blocks_processed} blocks processed")
             return epoch
         finally:
+            # Restore original Block.__init__ to avoid side effects for other tasks
             Block.__init__ = original_block_init
 
     epoch_end = time.perf_counter()
     logger.debug(
-        f"✅ Finished epoch {epoch} in {epoch_end - epoch_start:.2f}s; last_synced_epoch → {new_last}"
+        f"✅ Finished epoch {epoch} in {epoch_end - epoch_start:.2f}s"
     )
-    return new_last  # type: ignore[no-any-return]
+    return epoch
 
 
 @flow(  # type: ignore[arg-type]
@@ -140,11 +139,8 @@ async def historical_sync_flow(
     *,
     start_epoch: EpochNumber = FIRST_SHELLEY_EPOCH,
     batch_size: int | None = None,
-    min_batch_size: int | None = None,
     concurrent_epochs: int | None = None,
-    memory_config: AdaptiveMemoryConfig | None = None,
-    backpressure_config: RedisBackpressureConfig | None = None,
-    snapshot_frequency: int | None = None,
+    backpressure_config: RedisBackpressureConfig | None = None
 ) -> None:
     """
     Retrieves and relays data across a range of epochs against the system checkpoint.
