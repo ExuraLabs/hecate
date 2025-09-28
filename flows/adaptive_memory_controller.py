@@ -139,15 +139,12 @@ class AdaptiveMemoryController:
         return self._current_state
 
     def check_memory_and_adapt(
-        self, 
-        epoch: int,
-        original_batch_size: int,
-        current_batch_size: int
+        self, epoch: int, original_batch_size: int, current_batch_size: int
     ) -> MemoryResponse | None:
         """
         Single unified method that checks memory state and provides all adaptation decisions.
         Only performs actual memory checks according to check_interval_seconds.
-        
+
         :param epoch: Current epoch being processed (for logging)
         :param original_batch_size: The original/maximum batch size
         :param current_batch_size: The current batch size being used
@@ -157,8 +154,8 @@ class AdaptiveMemoryController:
         time_since_last_check = now - self._last_check_time
 
         should_check_memory = (
-            self._last_memory_response is None or 
-            time_since_last_check >= self.config.check_interval_seconds
+            self._last_memory_response is None
+            or time_since_last_check >= self.config.check_interval_seconds
         )
 
         if not should_check_memory:
@@ -209,29 +206,28 @@ class AdaptiveMemoryController:
             should_pause=should_pause,
             optimal_batch_size=optimal_batch_size,
             memory_status=memory_status,
-            requires_action=should_reduce_batch or should_pause
+            requires_action=should_reduce_batch or should_pause,
         )
         self._last_memory_response = memory_response
 
         return memory_response
 
     async def handle_memory_management(
-        self,
-        epoch: int,
-        original_batch_size: int,
-        current_batch_size: int
+        self, epoch: int, original_batch_size: int, current_batch_size: int
     ) -> int:
         """
         High-level method that handles all memory management concerns.
         This encapsulates the full memory management workflow and maintains
         single responsibility principle in the calling code.
-        
+
         :param epoch: Current epoch being processed
         :param original_batch_size: The original/maximum batch size
         :param current_batch_size: Current batch size being used
         :return: The optimal batch size to use (may be unchanged)
         """
-        memory_response = self.check_memory_and_adapt(epoch, original_batch_size, current_batch_size)
+        memory_response = self.check_memory_and_adapt(
+            epoch, original_batch_size, current_batch_size
+        )
         if memory_response is None:
             return current_batch_size
 
@@ -241,7 +237,7 @@ class AdaptiveMemoryController:
             f"Memory check performed: {memory_response.memory_status}, batch size: "
             f"{memory_response.optimal_batch_size}"
         )
-        
+
         return memory_response.optimal_batch_size
 
     async def pause_processing_if_needed(self, epoch: int | None = None) -> None:
@@ -251,7 +247,10 @@ class AdaptiveMemoryController:
 
         :param epoch: Optional epoch number for logging context
         """
-        if self._last_memory_response is None or not self._last_memory_response.should_pause:
+        if (
+            self._last_memory_response is None
+            or not self._last_memory_response.should_pause
+        ):
             return
 
         state = self._last_memory_response.state
@@ -309,7 +308,7 @@ class AdaptiveMemoryController:
             optimal_batch_size = min(self.max_batch_size, current_batch_size + 100)
         else:
             optimal_batch_size = current_batch_size
-            
+
         return optimal_batch_size
 
     def get_snapshot_info(self) -> dict:

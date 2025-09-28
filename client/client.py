@@ -28,7 +28,7 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
     its own async connection management as well as additional, higher-level methods.
     It uses an EndpointScout to intelligently manage WebSocket connections to multiple Ogmios instances.
 
-    :param endpoint_scout: An EndpointScout instance for connection management. If not provided, 
+    :param endpoint_scout: An EndpointScout instance for connection management. If not provided,
         it will be created from environment variables.
     :param rpc_version: The JSON-RPC version to use.
     """
@@ -51,7 +51,7 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         self.era_summaries = AsyncEraSummaries(self)
         self.chain_tip = AsyncTip(self)
         self.epoch = AsyncEpoch(self)
-        
+
     def _create_default_scout(self) -> EndpointScout:
         """Crea un scout con configuración por defecto desde variables de entorno."""
         settings = get_ogmios_settings()
@@ -72,9 +72,13 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
 
     async def connect(self, **connection_params: Any) -> None:
         """Establece conexión usando el endpoint scout."""
-        if self.connection and hasattr(self.connection, 'open') and self.connection.open:
+        if (
+            self.connection
+            and hasattr(self.connection, "open")
+            and self.connection.open
+        ):
             return
-            
+
         try:
             self.connection = await self.endpoint_scout.get_best_connection()
             logger.info("✅ Connected to Ogmios endpoint via EndpointScout")

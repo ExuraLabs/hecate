@@ -11,6 +11,7 @@ env_file = ".env.production"  # ".env.production"
 
 class OgmiosEndpointConfig(TypedDict):
     """Type definition for Ogmios endpoint configuration."""
+
     url: str
     weight: float
 
@@ -37,6 +38,7 @@ class MemorySettings(BaseSettings):
     emergency_threshold: float = Field(alias="MEMORY_EMERGENCY_THRESHOLD", default=0.90)
     check_interval_seconds: int = Field(alias="MEMORY_CHECK_INTERVAL", default=30)
     pause_duration_seconds: int = Field(alias="MEMORY_PAUSE_DURATION", default=5)
+
 
 class RedisSettings(BaseSettings):
     """Redis-related settings."""
@@ -85,9 +87,9 @@ class OgmiosSettings(BaseSettings):
     def endpoints(self) -> list[OgmiosEndpointConfig]:
         """
         Parse the JSON string and return a list of endpoint configurations.
-        
+
         Returns:
-            list[OgmiosEndpointConfig]: List of endpoint configurations with 
+            list[OgmiosEndpointConfig]: List of endpoint configurations with
                 url (str) and weight (float) fields.
         """
         parsed_endpoints: list[OgmiosEndpointConfig] = json.loads(self.endpoints_str)
@@ -130,8 +132,8 @@ def get_ogmios_settings() -> OgmiosSettings:
 def load_all_settings() -> None:
     """
     Preload all settings to populate the LRU cache.
-    
-    This ensures that settings are loaded once at startup rather than 
+
+    This ensures that settings are loaded once at startup rather than
     on first access, which can help with consistency and performance.
     """
     get_dask_settings()

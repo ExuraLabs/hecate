@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ConnectionMetrics:
     """Connection metrics for an endpoint."""
+
     latency_ms: float | None = None
     last_ping: float | None = None
     connection_errors: int = 0
@@ -20,7 +21,10 @@ class ConnectionMetrics:
 
 class SelectionPolicy(Protocol):
     """Protocol for endpoint selection policies."""
-    def select_endpoint(self, candidates: list[tuple[WebsocketUrl, ConnectionMetrics]]) -> WebsocketUrl:
+
+    def select_endpoint(
+        self, candidates: list[tuple[WebsocketUrl, ConnectionMetrics]]
+    ) -> WebsocketUrl:
         """Select the best endpoint from a list of candidates."""
         ...
 
@@ -28,10 +32,13 @@ class SelectionPolicy(Protocol):
 class LatencyBasedPolicy:
     """Selects the endpoint with the lowest latency."""
 
-    def select_endpoint(self, candidates: list[tuple[WebsocketUrl, ConnectionMetrics]]) -> WebsocketUrl:
+    def select_endpoint(
+        self, candidates: list[tuple[WebsocketUrl, ConnectionMetrics]]
+    ) -> WebsocketUrl:
         """Select the endpoint with the lowest latency from valid candidates."""
         valid_candidates = [
-            (url, metrics) for url, metrics in candidates 
+            (url, metrics)
+            for url, metrics in candidates
             if metrics.latency_ms is not None
         ]
 
@@ -39,7 +46,7 @@ class LatencyBasedPolicy:
             # Fallback to first if no valid metrics
             return candidates[0][0]
 
-        return min(valid_candidates, key=lambda x: x[1].latency_ms or float('inf'))[0]
+        return min(valid_candidates, key=lambda x: x[1].latency_ms or float("inf"))[0]
 
 
 class WeightedLatencyPolicy:
@@ -47,16 +54,21 @@ class WeightedLatencyPolicy:
     Policy that combines configured weight with measured latency.
     Useful for preferring certain endpoints unless latency is too high.
     """
-    
+
     def __init__(self, latency_threshold_ms: float = 1000):
         self.latency_threshold_ms = latency_threshold_ms
 
-    def select_endpoint(self, candidates: list[tuple[WebsocketUrl, ConnectionMetrics]]) -> WebsocketUrl:
+    def select_endpoint(
+        self, candidates: list[tuple[WebsocketUrl, ConnectionMetrics]]
+    ) -> WebsocketUrl:
         """Select endpoint using weighted random based on latency."""
         import random
+
         acceptable = [
-            (url, metrics) for url, metrics in candidates
-            if metrics.latency_ms is None or metrics.latency_ms < self.latency_threshold_ms
+            (url, metrics)
+            for url, metrics in candidates
+            if metrics.latency_ms is None
+            or metrics.latency_ms < self.latency_threshold_ms
         ]
 
         if not acceptable:
@@ -68,10 +80,12 @@ class WeightedLatencyPolicy:
 
         for url, metrics in acceptable:
             if metrics.latency_ms is None:
-                weight = 1.0 
+                weight = 1.0
             else:
                 # Invert latency so lower latency = higher weight
-                weight = 1000 / (metrics.latency_ms + 100)  # +100 to avoid division by zero
+                weight = 1000 / (
+                    metrics.latency_ms + 100
+                )  # +100 to avoid division by zero
 
             weights.append(weight)
             urls.append(url)
@@ -83,11 +97,11 @@ class WeightedLatencyPolicy:
 class EndpointScout:
     """
     Manages WebSocket connections to multiple Ogmios endpoints.
-    
+
     Maintains open connections and selects the best one based on real-time
     metrics, including latency and connection stability.
     """
-    
+
     def __init__(
         self,
         endpoints: list[WebsocketUrl],
@@ -99,7 +113,9 @@ class EndpointScout:
             endpoints: List of Ogmios WebSocket URLs
             selection_policy: Policy for selecting the best endpoint
         """
-        self.endpoints = endpoints if endpoints else self._load_endpoints_from_settings()
+        self.endpoints = (
+            endpoints if endpoints else self._load_endpoints_from_settings()
+        )
         self.selection_policy = selection_policy or LatencyBasedPolicy()
         self.connections: dict[WebsocketUrl, ClientConnection | None] = {}
         self.metrics: dict[WebsocketUrl, ConnectionMetrics] = {}
@@ -109,42 +125,53 @@ class EndpointScout:
     def _load_endpoints_from_settings() -> list[WebsocketUrl]:
         try:
             from config.settings import get_ogmios_settings
+
             settings = get_ogmios_settings()
-            endpoints = [WebsocketUrl(ep["url"]) for ep in settings.endpoints if ep.get("url")]
-            logger.info("Loaded %d endpoints from settings: %s", len(endpoints), [str(ep) for ep in endpoints])
+            endpoints = [
+                WebsocketUrl(ep["url"]) for ep in settings.endpoints if ep.get("url")
+            ]
+            logger.info(
+                "Loaded %d endpoints from settings: %s",
+                len(endpoints),
+                [str(ep) for ep in endpoints],
+            )
             return endpoints
         except (KeyError, ValueError, TypeError) as e:
             logger.error("Failed to load endpoints from settings: %s", e)
             return []
-        
+
     async def get_best_connection(self) -> ClientConnection:
         """
         Returns the best available connection.
-        
+
         If no connections are established, attempts to establish a new one.
-        
+
         Returns:
             ClientConnection: The best available WebSocket connection
-            
+
         Raises:
             ConnectionError: If no connection can be established
         """
         # Try to use existing connection
         healthy_connections = [
-            (url, conn) for url, conn in self.connections.items()
-            if conn and hasattr(conn, 'open') and conn.open
+            (url, conn)
+            for url, conn in self.connections.items()
+            if conn and hasattr(conn, "open") and conn.open
         ]
-        
+
         if healthy_connections:
-            candidates = [(url, self.metrics.get(url, ConnectionMetrics())) for url, _ in healthy_connections]
+            candidates = [
+                (url, self.metrics.get(url, ConnectionMetrics()))
+                for url, _ in healthy_connections
+            ]
             best_url = self.selection_policy.select_endpoint(candidates)
             best_connection = self.connections[best_url]
             if best_connection:
                 return best_connection
-        
+
         # If no healthy connections, establish new ones
         return await self._establish_best_connection()
-        
+
     async def _establish_best_connection(self) -> ClientConnection:
         """
         Establishes connection to the best available endpoint.
@@ -158,72 +185,88 @@ class EndpointScout:
         if not endpoints_to_try:
             logger.error("No endpoints configured, attempting to load from settings")
             endpoints_to_try = self._load_endpoints_from_settings()
-            
+
         if not endpoints_to_try:
-            raise ConnectionError("No endpoints available for connection. Check your .env and settings configuration.")
-            
-        logger.info("Attempting to connect to %d endpoints: %s", len(endpoints_to_try), [str(ep) for ep in endpoints_to_try])
+            raise ConnectionError(
+                "No endpoints available for connection. Check your .env and settings configuration."
+            )
+
+        logger.info(
+            "Attempting to connect to %d endpoints: %s",
+            len(endpoints_to_try),
+            [str(ep) for ep in endpoints_to_try],
+        )
         connection_attempts = []
-        
+
         for url in endpoints_to_try:
             success = False
             last_error = None
-            
+
             # Retry up to 3 times per endpoint
             for attempt in range(3):
                 try:
-                    logger.debug("Attempting connection to %s (attempt %d/3)", url, attempt + 1)
+                    logger.debug(
+                        "Attempting connection to %s (attempt %d/3)", url, attempt + 1
+                    )
                     start_time = time.perf_counter()
                     conn = await connect(str(url))
                     end_time = time.perf_counter()
                     latency = (end_time - start_time) * 1000
                     self.connections[url] = conn
                     self.metrics[url] = ConnectionMetrics(
-                        latency_ms=latency,
-                        last_ping=time.time()
+                        latency_ms=latency, last_ping=time.time()
                     )
                     connection_attempts.append((url, latency, conn))
-                    logger.info("Successfully connected to %s with %.2fms latency (attempt %d)", url, latency, attempt + 1)
+                    logger.info(
+                        "Successfully connected to %s with %.2fms latency (attempt %d)",
+                        url,
+                        latency,
+                        attempt + 1,
+                    )
                     success = True
                     break
                 except (ConnectionClosed, asyncio.TimeoutError, OSError) as e:
                     last_error = e
                     if attempt < 2:
-                        logger.debug("Connection attempt %d failed for %s: %s, retrying...", attempt + 1, url, e)
+                        logger.debug(
+                            "Connection attempt %d failed for %s: %s, retrying...",
+                            attempt + 1,
+                            url,
+                            e,
+                        )
                         await asyncio.sleep(0.5)
                     else:
-                        logger.warning("All 3 connection attempts failed for %s: %s", url, e)
-            
+                        logger.warning(
+                            "All 3 connection attempts failed for %s: %s", url, e
+                        )
+
             if not success and last_error:
-                self.metrics[url] = ConnectionMetrics(
-                    latency_ms=None,
-                    last_ping=None
-                )
-                
+                self.metrics[url] = ConnectionMetrics(latency_ms=None, last_ping=None)
+
         if not connection_attempts:
             raise ConnectionError("No endpoints available for connection")
-            
+
         # Select the best established connection (lowest latency)
         best_url, _, best_conn = min(connection_attempts, key=lambda x: x[1])
         logger.info("Selected best endpoint: %s", best_url)
-        
+
         # Close other connections to avoid resource waste
         for url, _, conn in connection_attempts:
             if url != best_url:
                 await conn.close()
                 self.connections[url] = None
-                
+
         return best_conn
-    
+
     async def start_monitoring(self) -> None:
         """Start continuous endpoint monitoring."""
         if self._monitoring_task and not self._monitoring_task.done():
             logger.debug("Monitoring task already running")
             return
-            
+
         self._monitoring_task = asyncio.create_task(self._monitoring_loop())
         logger.info("🔍 Started endpoint monitoring")
-        
+
     async def stop_monitoring(self) -> None:
         """Stop continuous endpoint monitoring."""
         if self._monitoring_task and not self._monitoring_task.done():
@@ -233,17 +276,19 @@ class EndpointScout:
             except asyncio.CancelledError:
                 pass
             logger.info("Stopped endpoint monitoring")
-        
+
     async def _monitoring_loop(self) -> None:
         """Monitoring loop that pings active connections."""
         while True:
             await asyncio.sleep(30)  # Ping every 30 seconds
-            
+
             for url, connection in list(self.connections.items()):
-                if connection and hasattr(connection, 'open') and connection.open:
+                if connection and hasattr(connection, "open") and connection.open:
                     await self._ping_connection(url, connection)
-                    
-    async def _ping_connection(self, url: WebsocketUrl, connection: ClientConnection) -> None:
+
+    async def _ping_connection(
+        self, url: WebsocketUrl, connection: ClientConnection
+    ) -> None:
         """
         Ping a connection to measure real latency and update error metrics.
         Uses native WebSocket ping frames instead of HTTP health checks.
@@ -269,15 +314,15 @@ class EndpointScout:
             metrics.connection_errors += 1
             metrics.last_error_time = time.time()
             self.metrics[url] = metrics
-            
+
     async def close_all_connections(self) -> None:
         """Close all open connections."""
         await self.stop_monitoring()
-        
+
         for url, connection in self.connections.items():
-            if connection and hasattr(connection, 'open') and connection.open:
+            if connection and hasattr(connection, "open") and connection.open:
                 await connection.close()
                 logger.debug("Closed connection to %s", url)
-        
+
         self.connections.clear()
         logger.info("All connections closed")

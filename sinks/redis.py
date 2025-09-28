@@ -206,9 +206,9 @@ class HistoricalRedisSink(DataSink):
 
         # Initialize backpressure config using Redis settings
         backpressure_config = RedisBackpressureConfig(
-                max_depth=self._redis_settings.max_stream_depth,
-                check_interval=self._redis_settings.check_interval,
-            )
+            max_depth=self._redis_settings.max_stream_depth,
+            check_interval=self._redis_settings.check_interval,
+        )
         self.backpressure_config = backpressure_config
 
     async def __aenter__(self):
