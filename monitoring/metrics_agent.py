@@ -89,7 +89,19 @@ async def collect_and_publish_metrics() -> None:
                 **{f"redis_{k}": v for k, v in metrics.redis_stream_depths.items()},
             }
         )
-        logger.info(f"📊 System metrics: {metrics.memory_used_gb:.1f}GB memory, {len(metrics.redis_stream_depths)} streams")
+        if logger.level > logging.INFO:
+            logger.setLevel(logging.INFO)
+
+        # Build a more informative log message
+        log_msg = (
+            f"📊 Metrics | "
+            f"Memory: {metrics.memory_used_gb:.2f}GB ({metrics.memory_used_percent:.1f}%) | "
+            f"Streams: {metrics.redis_stream_depths} | "
+            f"Active Epochs: {metrics.active_epochs} | "
+            f"Blocks/sec: {metrics.blocks_per_second:.2f} | "
+            f"System Load: {metrics.system_load:.2f}"
+        )
+        logger.info(log_msg)
 
 @flow(name="metrics-agent", log_prints=True)
 async def metrics_collection_flow() -> None:
