@@ -54,7 +54,6 @@ def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
 async def sync_epoch(
     epoch: EpochNumber,
     batch_size: int = 1000,
-    memory_controller: AdaptiveMemoryController | None = None,
 ) -> EpochNumber:
     """
     Synchronize a specific epoch by fetching blocks of data in batches and relaying them.
@@ -66,14 +65,15 @@ async def sync_epoch(
     :type epoch: EpochNumber
     :param batch_size: The initial number of blocks to process in each batch.
     :type batch_size: int
-    :param memory_controller: Optional memory controller for adaptive batch sizing.
-    :type memory_controller: AdaptiveMemoryController | None
     :return: The updated epoch number indicating the last successfully synced epoch.
     :rtype: EpochNumber
     """
     logger = get_run_logger()
     epoch_start = time.perf_counter()
     logger.debug(f"▶️  Starting sync for epoch {epoch}")
+
+    # Instancia local del controlador de memoria
+    memory_controller = AdaptiveMemoryController()
 
     async with (
         HecateClient() as client,
@@ -96,9 +96,7 @@ async def sync_epoch(
                     last_height = block.height
 
                     # Adapt batch size using memory controller (when needed)
-                    if (
-                        memory_controller and len(batch) % 1000 == 0
-                    ):  # Check every 1000 blocks
+                    if len(batch) % 1000 == 0:  # Check every 1000 blocks
                         current_batch_size = (
                             await memory_controller.handle_memory_management(
                                 epoch, batch_size, current_batch_size
@@ -133,7 +131,7 @@ async def sync_epoch(
             Block.__init__ = original_block_init
 
     epoch_end = time.perf_counter()
-    logger.debug(f"✅ Finished epoch {epoch} in {epoch_end - epoch_start:.2f}s")
+    logger.info(f"✅ Epoch {epoch} sync complete in {epoch_end - epoch_start:.2f}s")
     return epoch
 
 
@@ -180,9 +178,6 @@ async def historical_sync_flow(
     final_batch_size = batch_size or batch_settings.base_size
     final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers
 
-    # Create adaptive memory controller for batch size optimization
-    memory_controller = AdaptiveMemoryController()
-
     async with HistoricalRedisSink(start_epoch=start_epoch) as sink:
         last = await sink.get_last_synced_epoch()
 
@@ -217,7 +212,6 @@ async def historical_sync_flow(
         futures = sync_epoch.map(
             epoch=batch_epochs,
             batch_size=final_batch_size,
-            memory_controller=memory_controller,
         )
         wait(futures)
 
