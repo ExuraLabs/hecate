@@ -14,6 +14,8 @@ class ConnectionMetrics:
     """Connection metrics for an endpoint."""
     latency_ms: float | None = None
     last_ping: float | None = None
+    connection_errors: int = 0
+    last_error_time: float | None = None
 
 
 class SelectionPolicy(Protocol):
@@ -61,13 +63,12 @@ class WeightedLatencyPolicy:
             # If all have high latency, use best available
             acceptable = candidates
 
-        # For acceptable endpoints, use weighted random based on performance
         weights = []
         urls = []
 
         for url, metrics in acceptable:
             if metrics.latency_ms is None:
-                weight = 1.0  # Neutral weight for unknown latency
+                weight = 1.0 
             else:
                 # Invert latency so lower latency = higher weight
                 weight = 1000 / (metrics.latency_ms + 100)  # +100 to avoid division by zero
@@ -187,9 +188,9 @@ class EndpointScout:
                     break
                 except (ConnectionClosed, asyncio.TimeoutError, OSError) as e:
                     last_error = e
-                    if attempt < 2:  # Not the last attempt
+                    if attempt < 2:
                         logger.debug("Connection attempt %d failed for %s: %s, retrying...", attempt + 1, url, e)
-                        await asyncio.sleep(0.5)  # Brief delay between retries
+                        await asyncio.sleep(0.5)
                     else:
                         logger.warning("All 3 connection attempts failed for %s: %s", url, e)
             
@@ -244,46 +245,30 @@ class EndpointScout:
                     
     async def _ping_connection(self, url: WebsocketUrl, connection: ClientConnection) -> None:
         """
-        Ping a connection to measure real latency.
-        
+        Ping a connection to measure real latency and update error metrics.
         Uses native WebSocket ping frames instead of HTTP health checks.
         This measures actual responsiveness of the endpoint for Ogmios operations.
-        
-        Args:
-            url: Endpoint URL
-            connection: Active WebSocket connection
         """
         try:
             start_time = time.perf_counter()
-            
-            # Send native WebSocket ping
             pong_waiter = await connection.ping()
             await asyncio.wait_for(pong_waiter, timeout=5.0)
-            
             end_time = time.perf_counter()
             latency_ms = (end_time - start_time) * 1000
-            
-            # Update metrics
-            existing_metrics = self.metrics.get(url, ConnectionMetrics())
-            self.metrics[url] = ConnectionMetrics(
-                latency_ms=latency_ms,
-                last_ping=time.time()
-            )
-            
+
+            metrics = self.metrics.get(url, ConnectionMetrics())
+            metrics.latency_ms = latency_ms
+            metrics.last_ping = time.time()
+            self.metrics[url] = metrics
             logger.debug("Ping %s: %.2fms", url, latency_ms)
-            
         except (asyncio.TimeoutError, ConnectionClosed) as e:
             logger.warning("Ping failed for %s: %s", url, e)
-            
-            # Mark connection as problematic
             await connection.close()
             self.connections[url] = None
-            
-            existing_metrics = self.metrics.get(url, ConnectionMetrics())
-            self.metrics[url] = ConnectionMetrics(
-                latency_ms=existing_metrics.latency_ms,
-                last_ping=existing_metrics.last_ping
-            )
+            metrics = self.metrics.get(url, ConnectionMetrics())
+            metrics.connection_errors += 1
+            metrics.last_error_time = time.time()
+            self.metrics[url] = metrics
             
     async def close_all_connections(self) -> None:
         """Close all open connections."""

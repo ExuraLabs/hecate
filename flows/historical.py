@@ -93,7 +93,6 @@ async def sync_epoch(
     epoch_start = time.perf_counter()
     logger.debug(f"▶️  Starting sync for epoch {epoch}")
 
-    # Solo lógica de sincronización de bloques y batches
     async with (
         HecateClient() as client,
         HistoricalRedisSink(backpressure_config=backpressure_config) as sink,
