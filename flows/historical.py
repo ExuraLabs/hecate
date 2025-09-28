@@ -1,6 +1,5 @@
 import time
 from typing import Any
-import asyncio
 from models import BlockHeight
 
 from ogmios import Block
@@ -18,10 +17,8 @@ from flows import get_system_checkpoint
 from models import EpochNumber
 from flows.adaptive_memory_controller import (
     AdaptiveMemoryConfig,
-    AdaptiveMemoryController,
 )
 from sinks.backpressure_monitor import RedisBackpressureConfig
-from monitoring.metrics_collector import MetricsCollector
 from config.settings import (
     get_batch_settings,
     get_dask_settings,
@@ -96,149 +93,59 @@ async def sync_epoch(
     epoch_start = time.perf_counter()
     logger.debug(f"▶️  Starting sync for epoch {epoch}")
 
-    mem_controller = AdaptiveMemoryController(config=memory_config)
-    current_batch_size = batch_size
-
-    # Fetch _and_ stream blocks concurrently
+    # Solo lógica de sincronización de bloques y batches
     async with (
-        HistoricalRedisSink(backpressure_config=backpressure_config) as sink,
         HecateClient() as client,
+        HistoricalRedisSink(backpressure_config=backpressure_config) as sink,
     ):
-        # Apply the fast block initialization optimization for this context
         original_block_init = Block.__init__
         Block.__init__ = fast_block_init
-
         try:
-            # Initialize metrics collector with this client's endpoint_scout and memory controller
-            redis_settings = get_redis_settings()
-            metrics_collector = MetricsCollector(
-                redis_url=redis_settings.url,
-                stream_keys=[
-                    "hecate:history:data_stream",
-                    "hecate:history:event_stream",
-                ],
-                endpoint_scout=client.endpoint_scout,  # Use the client's endpoint_scout
-                memory_controller=mem_controller,  # Include memory controller for integrated monitoring
-            )
-
-            await metrics_collector.start()
-            logger.debug(f"MetricsCollector started for epoch {epoch}")
-
             start_height = await sink.get_epoch_resume_height(epoch) or None
-
-            batches_sent = 0
             batch: list[Block] = []
             last_height: BlockHeight | int = -1
             blocks_processed_in_epoch = 0
 
-            # Get an initial snapshot for this epoch
-            initial_snapshot = await metrics_collector.collect_snapshot()
-            logger.info(f"Epoch {epoch} start snapshot: {initial_snapshot}")
-
             async for blocks in client.epoch_blocks(epoch):
-                # Emergency pause if memory is critical
-                if mem_controller.should_pause_processing():
-                    logger.warning(
-                        f"Memory emergency for epoch {epoch}, pausing for 15s..."
-                    )
-                    await asyncio.sleep(15)
-
-                # Adjust batch size based on memory
-                if mem_controller.should_reduce_batch_size():
-                    old_batch_size = current_batch_size
-                    current_batch_size = max(
-                        min_batch_size, int(current_batch_size / 2)
-                    )
-                    logger.info(
-                        f"Reducing batch size from {old_batch_size} to {current_batch_size} due to memory pressure."
-                    )
-                else:
-                    current_batch_size = batch_size  # Restore if memory is okay
-
                 for blk in blocks:
-                    # skip blocks already synced
                     if start_height and blk.height <= start_height:
                         continue
                     batch.append(blk)
                     blocks_processed_in_epoch += 1
-
-                    if len(batch) < current_batch_size:
-                        continue
-                    # send batch to sink
-                    batch_start = time.perf_counter()
-                    await sink.send_batch(batch, epoch=epoch)
-                    batch_end = time.perf_counter()
-                    batches_sent += 1
-                    last_height = batch[-1].height
-
-                    # Update metrics with blocks processed
-                    metrics_collector.update_block_count(len(batch))
-
-                    # Collect snapshots based on configured frequency
-                    if batches_sent == 1 or batches_sent % snapshot_frequency == 0:
-                        await asyncio.sleep(0.1)  # Small delay for timing
-                        snapshot = await metrics_collector.collect_snapshot()
-                        logger.info(
-                            f"Epoch {epoch} batch {batches_sent} snapshot: {snapshot}"
+                    if len(batch) >= batch_size:
+                        batch_start = time.perf_counter()
+                        await sink.send_batch(batch, epoch=epoch)
+                        batch_end = time.perf_counter()
+                        last_height = batch[-1].height
+                        logger.debug(
+                            f"Epoch {epoch} Batch: sent {len(batch)} blocks in {batch_end - batch_start:.2f}s"
                         )
+                        batch.clear()
 
-                    logger.debug(
-                        f"Epoch {epoch} Batch #{batches_sent}: sent {len(batch)} blocks "
-                        f"in {batch_end - batch_start:.2f}s"
-                    )
-                    batch.clear()
-
-            # finalize partially filled batch, if any
+            # Finalizar batch parcial si existe
             if batch:
                 batch_start = time.perf_counter()
                 await sink.send_batch(batch, epoch=epoch)
                 batch_end = time.perf_counter()
-                batches_sent += 1
                 last_height = batch[-1].height
-
-                # Update metrics with final batch
-                metrics_collector.update_block_count(len(batch))
-
-                # Always show snapshot for final batch since it's important
-                snapshot = await metrics_collector.collect_snapshot()
-                logger.info(
-                    f"Epoch {epoch} final batch {batches_sent} processing snapshot: {snapshot}"
-                )
-
                 logger.debug(
-                    f"Epoch {epoch} Final batch #{batches_sent}: sent {len(batch)} blocks "
-                    f"in {batch_end - batch_start:.2f}s"
+                    f"Epoch {epoch} Final batch: sent {len(batch)} blocks in {batch_end - batch_start:.2f}s"
                 )
                 batch.clear()
 
-            # Get final epoch summary snapshot after all processing is done
-            # This will show 0 BPS since no recent processing, but good for final state
             logger.info(
                 f"Epoch {epoch} completed. Total blocks processed: {blocks_processed_in_epoch}"
             )
-
-            # mark done and advance last_synced_epoch
             new_last = await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
         except Exception as e:
             logger.error(f"Error syncing epoch {epoch}: {e}")
             raise
         finally:
-            # Restore original Block.__init__
             Block.__init__ = original_block_init
-
-            # Clean up metrics collector
-            try:
-                await metrics_collector.stop()
-                logger.debug(f"MetricsCollector stopped for epoch {epoch}")
-            except Exception as e:
-                logger.warning(
-                    f"Error stopping metrics collector for epoch {epoch}: {e}"
-                )
 
     epoch_end = time.perf_counter()
     logger.debug(
-        f"✅ Finished epoch {epoch} in {epoch_end - epoch_start:.2f}s; "
-        f"last_synced_epoch → {new_last}"
+        f"✅ Finished epoch {epoch} in {epoch_end - epoch_start:.2f}s; last_synced_epoch → {new_last}"
     )
     return new_last  # type: ignore[no-any-return]
 
@@ -324,7 +231,7 @@ async def historical_sync_flow(
         logger.info(
             f"🔄 Resuming after last synced epoch {last} instead of {start_epoch}"
         )
-        start_epoch = last + 1
+    start_epoch = EpochNumber(last + 1)
 
     target = get_system_checkpoint()
     epochs = list(range(start_epoch, target + 1))
