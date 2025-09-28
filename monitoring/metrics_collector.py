@@ -6,7 +6,6 @@ from typing import Any
 
 import psutil
 import redis.asyncio as redis
-from client.multi_source_balancer import MultiSourceBalancer
 from flows.adaptive_memory_controller import AdaptiveMemoryController
 
 logger = logging.getLogger(__name__)
@@ -33,13 +32,13 @@ class MetricsCollector:
         self,
         redis_url: str,
         stream_keys: list[str],
-        balancer: MultiSourceBalancer | None = None,
-        memory_controller: AdaptiveMemoryController | None = None,
+        endpoint_scout: Any,
+        memory_controller: AdaptiveMemoryController | None,
         interval_seconds: int = 15,
     ):
         self.redis_url = redis_url
         self.stream_keys = stream_keys
-        self.balancer = balancer
+        self.endpoint_scout = endpoint_scout
         self.memory_controller = memory_controller
         self.interval = interval_seconds
         self.process = psutil.Process()
@@ -82,26 +81,25 @@ class MetricsCollector:
         return depths
 
     def _get_ogmios_status(self) -> dict[str, dict[str, Any]]:
-        """Gets the status of Ogmios endpoints from the balancer."""
-        if not self.balancer:
-            logger.debug("No balancer available for ogmios status")
+        """Gets the status of Ogmios endpoints from the endpoint_scout."""
+        if not self.endpoint_scout:
+            logger.debug("No endpoint_scout available for ogmios status")
             return {}
 
-        if not hasattr(self.balancer, "endpoints") or not self.balancer.endpoints:
-            logger.debug("No endpoints found in balancer")
+        endpoints = getattr(self.endpoint_scout, "endpoints", None)
+        metrics = getattr(self.endpoint_scout, "metrics", {})
+        if not endpoints:
+            logger.debug("No endpoints found in endpoint_scout")
             return {}
 
         try:
-            status = {
-                str(ep.url): {
-                    "is_healthy": ep.is_healthy,
-                    "latency_ms": f"{ep.latency_ms:.2f}"
-                    if ep.latency_ms is not None
-                    else "unknown",
-                    "weight": round(ep.weight, 3),
+            status = {}
+            for ep in endpoints:
+                metric = metrics.get(ep, {})
+                status[str(ep)] = {
+                    "latency_ms": metric.latency_ms if hasattr(metric, "latency_ms") else None,
+                    "last_ping": metric.last_ping if hasattr(metric, "last_ping") else None,
                 }
-                for ep in self.balancer.endpoints
-            }
             logger.debug(f"Collected ogmios status for {len(status)} endpoints")
             return status
         except Exception as e:

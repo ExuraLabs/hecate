@@ -109,7 +109,7 @@ async def sync_epoch(
         Block.__init__ = fast_block_init
 
         try:
-            # Initialize metrics collector with this client's balancer and memory controller
+            # Initialize metrics collector with this client's endpoint_scout and memory controller
             redis_settings = get_redis_settings()
             metrics_collector = MetricsCollector(
                 redis_url=redis_settings.url,
@@ -117,7 +117,7 @@ async def sync_epoch(
                     "hecate:history:data_stream",
                     "hecate:history:event_stream",
                 ],
-                balancer=client.balancer,  # Use the actual client's balancer
+                endpoint_scout=client.endpoint_scout,  # Use the client's endpoint_scout
                 memory_controller=mem_controller,  # Include memory controller for integrated monitoring
             )
 
