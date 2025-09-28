@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -6,6 +7,7 @@ import psutil
 from pydantic import BaseModel
 
 from config.settings import get_memory_settings
+from config.settings import get_batch_settings
 
 
 def _get_logger():
@@ -15,14 +17,13 @@ def _get_logger():
 
         return get_run_logger()
     except (ImportError, RuntimeError):
-        # Fallback to standard logging if Prefect is not available or no run context
         return logging.getLogger(__name__)
 
 
 class AdaptiveMemoryConfig(BaseModel):
     """Configuration for the Adaptive Memory Controller."""
 
-    memory_limit_gb: float = 16.0
+    memory_limit_gb: float = 10.0
     warning_threshold: float = 0.75
     critical_threshold: float = 0.85
     emergency_threshold: float = 0.90
@@ -37,6 +38,18 @@ class MemoryState:
     available_gb: float
     used_gb: float
     used_percent: float
+
+
+@dataclass
+class MemoryResponse:
+    """Consolidated response from memory controller operations."""
+
+    state: MemoryState
+    should_reduce_batch: bool
+    should_pause: bool
+    optimal_batch_size: int
+    memory_status: str
+    requires_action: bool
 
 
 class AdaptiveMemoryController:
@@ -54,6 +67,10 @@ class AdaptiveMemoryController:
         self.process = psutil.Process()
         self._last_check_time: float = 0
         self._current_state: MemoryState | None = None
+        self._last_memory_response: MemoryResponse | None = None
+        self.min_batch_size = get_batch_settings().min_size
+        self.max_batch_size = get_batch_settings().max_size
+        self.pause_interval_seconds = self.config.check_interval_seconds
 
         # Calculate absolute thresholds in GB
         self.warning_limit_gb = (
@@ -66,18 +83,22 @@ class AdaptiveMemoryController:
             self.config.memory_limit_gb * self.config.emergency_threshold
         )
 
-        logger = _get_logger()
-        logger.info(
-            f"AdaptiveMemoryController initialized with limit: {self.config.memory_limit_gb:.2f} GB"
+        self.logger = _get_logger()
+        self.logger.info(
+            "AdaptiveMemoryController initialized with limit: "
+            f"{self.config.memory_limit_gb:.2f} GB"
         )
-        logger.info(
-            f"  - Warning threshold:  {self.warning_limit_gb:.2f} GB ({self.config.warning_threshold:.0%})"
+        self.logger.info(
+            f"  - Warning threshold:  {self.warning_limit_gb:.2f} GB "
+            f"({self.config.warning_threshold:.0%})"
         )
-        logger.info(
-            f"  - Critical threshold: {self.critical_limit_gb:.2f} GB ({self.config.critical_threshold:.0%})"
+        self.logger.info(
+            f"  - Critical threshold: {self.critical_limit_gb:.2f} GB "
+            f"({self.config.critical_threshold:.0%})"
         )
-        logger.info(
-            f"  - Emergency threshold: {self.emergency_limit_gb:.2f} GB ({self.config.emergency_threshold:.0%})"
+        self.logger.info(
+            f"  - Emergency threshold: {self.emergency_limit_gb:.2f} GB "
+            f"({self.config.emergency_threshold:.0%})"
         )
 
     def _get_current_memory_usage(self) -> MemoryState:
@@ -96,7 +117,7 @@ class AdaptiveMemoryController:
         used_gb = total_used_bytes / (1024**3)
 
         return MemoryState(
-            total_gb=self.config.memory_limit_gb,  # This is the configured limit, not system total
+            total_gb=self.config.memory_limit_gb,
             available_gb=self.config.memory_limit_gb - used_gb,
             used_gb=used_gb,
             used_percent=used_gb / self.config.memory_limit_gb,
@@ -117,53 +138,197 @@ class AdaptiveMemoryController:
 
         return self._current_state
 
+    def check_memory_and_adapt(
+        self, 
+        epoch: int,
+        original_batch_size: int,
+        current_batch_size: int
+    ) -> MemoryResponse | None:
+        """
+        Single unified method that checks memory state and provides all adaptation decisions.
+        Only performs actual memory checks according to check_interval_seconds.
+        
+        :param epoch: Current epoch being processed (for logging)
+        :param original_batch_size: The original/maximum batch size
+        :param current_batch_size: The current batch size being used
+        :return: MemoryResponse with all decision data, or None if no check was performed
+        """
+        now = time.time()
+        time_since_last_check = now - self._last_check_time
+
+        should_check_memory = (
+            self._last_memory_response is None or 
+            time_since_last_check >= self.config.check_interval_seconds
+        )
+
+        if not should_check_memory:
+            return None
+
+        self._last_check_time = now
+        state = self.get_memory_state(force_refresh=True)
+
+        should_reduce_batch = state.used_gb >= self.critical_limit_gb
+        should_pause = state.used_gb >= self.emergency_limit_gb
+
+        if state.used_gb >= self.emergency_limit_gb:
+            memory_status = "EMERGENCY"
+        elif state.used_gb >= self.critical_limit_gb:
+            memory_status = "CRITICAL"
+        elif state.used_gb >= self.warning_limit_gb:
+            memory_status = "WARNING"
+        else:
+            memory_status = "NORMAL"
+
+        if should_reduce_batch:
+            optimal_batch_size = max(self.min_batch_size, current_batch_size // 2)
+            if optimal_batch_size != current_batch_size:
+                self.logger.info(
+                    "High memory pressure detected, reducing batch size from "
+                    f"{current_batch_size} to {optimal_batch_size}"
+                )
+        elif current_batch_size < original_batch_size:
+            optimal_batch_size = min(self.max_batch_size, current_batch_size + 100)
+            if optimal_batch_size != current_batch_size:
+                self.logger.debug(
+                    "Memory pressure normal, increasing batch size from "
+                    f"{current_batch_size} to {optimal_batch_size}"
+                )
+        else:
+            optimal_batch_size = current_batch_size
+
+        if should_pause:
+            self.logger.warning(
+                f"Memory emergency threshold reached during epoch {epoch} "
+                f"({state.used_gb:.2f}GB/{state.total_gb:.2f}GB = {state.used_percent:.1%}), "
+                f"pausing processing for memory recovery"
+            )
+
+        memory_response = MemoryResponse(
+            state=state,
+            should_reduce_batch=should_reduce_batch,
+            should_pause=should_pause,
+            optimal_batch_size=optimal_batch_size,
+            memory_status=memory_status,
+            requires_action=should_reduce_batch or should_pause
+        )
+        self._last_memory_response = memory_response
+
+        return memory_response
+
+    async def handle_memory_management(
+        self,
+        epoch: int,
+        original_batch_size: int,
+        current_batch_size: int
+    ) -> int:
+        """
+        High-level method that handles all memory management concerns.
+        This encapsulates the full memory management workflow and maintains
+        single responsibility principle in the calling code.
+        
+        :param epoch: Current epoch being processed
+        :param original_batch_size: The original/maximum batch size
+        :param current_batch_size: Current batch size being used
+        :return: The optimal batch size to use (may be unchanged)
+        """
+        memory_response = self.check_memory_and_adapt(epoch, original_batch_size, current_batch_size)
+        if memory_response is None:
+            return current_batch_size
+
+        await self.pause_processing_if_needed(epoch)
+
+        self.logger.debug(
+            f"Memory check performed: {memory_response.memory_status}, batch size: "
+            f"{memory_response.optimal_batch_size}"
+        )
+        
+        return memory_response.optimal_batch_size
+
+    async def pause_processing_if_needed(self, epoch: int | None = None) -> None:
+        """
+        Pause processing when memory pressure requires it.
+        Uses the last memory check result
+
+        :param epoch: Optional epoch number for logging context
+        """
+        if self._last_memory_response is None or not self._last_memory_response.should_pause:
+            return
+
+        state = self._last_memory_response.state
+
+        if epoch is not None:
+            self.logger.warning(
+                f"Memory emergency threshold reached during epoch {epoch} "
+                f"({state.used_gb:.2f}GB/{state.total_gb:.2f}GB = {state.used_percent:.1%}), "
+                f"pausing processing for memory recovery"
+            )
+        else:
+            self.logger.warning(
+                f"Memory emergency threshold reached "
+                f"({state.used_gb:.2f}GB/{state.total_gb:.2f}GB = {state.used_percent:.1%}), "
+                f"pausing processing for memory recovery"
+            )
+
+        await asyncio.sleep(self.pause_interval_seconds)
+
     def should_reduce_batch_size(self) -> bool:
         """
         Returns True if memory usage is above the critical threshold.
         """
-        state = self.get_memory_state()
-        return state.used_gb >= self.critical_limit_gb
+        if self._last_memory_response is None:
+            return False
+        return self._last_memory_response.should_reduce_batch
 
     def should_pause_processing(self) -> bool:
         """
         Returns True if memory usage is above the emergency threshold.
         """
-        state = self.get_memory_state()
-        return state.used_gb >= self.emergency_limit_gb
+        if self._last_memory_response is None:
+            return False
+        return self._last_memory_response.should_pause
+
+    def get_optimal_batch_size(
+        self, original_batch_size: int, current_batch_size: int
+    ) -> int:
+        """
+        Returns the optimal batch size based on current memory pressure.
+        Encapsulates all batch size adaptation logic.
+
+        :param original_batch_size: The original/maximum batch size
+        :param current_batch_size: The current batch size being used
+        :return: The optimal batch size to use
+        """
+        if self._last_memory_response is None:
+            return current_batch_size
+
+        response = self._last_memory_response
+
+        if response.should_reduce_batch:
+            optimal_batch_size = max(self.min_batch_size, current_batch_size // 2)
+        elif current_batch_size < original_batch_size:
+            optimal_batch_size = min(self.max_batch_size, current_batch_size + 100)
+        else:
+            optimal_batch_size = current_batch_size
+            
+        return optimal_batch_size
 
     def get_snapshot_info(self) -> dict:
         """Get memory controller information for system snapshots."""
-        try:
-            state = self.get_memory_state()
-            memory_pressure = (
-                self.should_reduce_batch_size() or self.should_pause_processing()
-            )
-
-            # Determine status based on thresholds
-            if state.used_gb >= self.emergency_limit_gb:
-                memory_status = "EMERGENCY"
-            elif state.used_gb >= self.critical_limit_gb:
-                memory_status = "CRITICAL"
-            elif state.used_gb >= self.warning_limit_gb:
-                memory_status = "WARNING"
-            else:
-                memory_status = "NORMAL"
-
+        if self._last_memory_response is None:
             return {
-                "memory_limit_gb": state.total_gb,
-                "memory_available_gb": state.available_gb,
-                "memory_status": memory_status,
-                "memory_pressure": memory_pressure,
-            }
-        except Exception as e:
-            logger = _get_logger()
-            logger.debug(f"Error collecting memory controller info: {e}")
-            return {
-                "memory_limit_gb": None,
+                "memory_limit_gb": self.config.memory_limit_gb,
                 "memory_available_gb": None,
-                "memory_status": None,
-                "memory_pressure": None,
+                "memory_status": "NO_CHECK",
+                "memory_pressure": False,
             }
+
+        response = self._last_memory_response
+        return {
+            "memory_limit_gb": response.state.total_gb,
+            "memory_available_gb": response.state.available_gb,
+            "memory_status": response.memory_status,
+            "memory_pressure": response.requires_action,
+        }
 
     def format_memory_info(self, base_memory_info: str) -> str:
         """Format memory information for display, including controller status."""
@@ -177,5 +342,5 @@ class AdaptiveMemoryController:
                 memory_info += " PRESSURE!"
 
             return memory_info
-        except Exception:
+        except (KeyError, TypeError):
             return base_memory_info

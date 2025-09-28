@@ -6,21 +6,13 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-env_file = ".env"  # ".env.production"
+env_file = ".env.production"  # ".env.production"
 
 
 class OgmiosEndpointConfig(TypedDict):
     """Type definition for Ogmios endpoint configuration."""
     url: str
     weight: float
-
-
-class GeneralSettings(BaseSettings):
-    """General application settings."""
-
-    model_config = SettingsConfigDict(
-        env_file=env_file, env_file_encoding="utf-8", extra="ignore"
-    )
 
 
 class DaskSettings(BaseSettings):
@@ -34,19 +26,17 @@ class DaskSettings(BaseSettings):
 
 
 class MemorySettings(BaseSettings):
-    """Adaptive memory controller settings."""
+    """Memory-related settings."""
 
     model_config = SettingsConfigDict(
         env_file=env_file, env_file_encoding="utf-8", extra="ignore"
     )
-    memory_limit_gb: float = Field(alias="PREFECT_MEMORY_LIMIT_GB", default=24.0)
+    memory_limit_gb: float = Field(alias="MEMORY_LIMIT_GB", default=2.0)
     warning_threshold: float = Field(alias="MEMORY_WARNING_THRESHOLD", default=0.75)
     critical_threshold: float = Field(alias="MEMORY_CRITICAL_THRESHOLD", default=0.85)
     emergency_threshold: float = Field(alias="MEMORY_EMERGENCY_THRESHOLD", default=0.90)
-    check_interval_seconds: int = Field(
-        alias="MEMORY_CHECK_INTERVAL_SECONDS", default=10
-    )
-
+    check_interval_seconds: int = Field(alias="MEMORY_CHECK_INTERVAL", default=30)
+    pause_duration_seconds: int = Field(alias="MEMORY_PAUSE_DURATION", default=5)
 
 class RedisSettings(BaseSettings):
     """Redis-related settings."""
@@ -57,7 +47,7 @@ class RedisSettings(BaseSettings):
     url: str = Field(alias="REDIS_URL", default="redis://localhost:6379/0")
     max_stream_depth: int = Field(alias="REDIS_MAX_STREAM_DEPTH", default=10000)
     warning_threshold: int = Field(alias="REDIS_WARNING_THRESHOLD", default=7500)
-    check_interval: int = Field(alias="REDIS_CHECK_INTERVAL", default=10)
+    check_interval: int = Field(alias="REDIS_CHECK_INTERVAL", default=30)
 
 
 class BatchSettings(BaseSettings):

@@ -4,7 +4,7 @@ from models import BlockHeight
 
 from ogmios import Block
 import ogmios.model.model_map as mm
-from prefect import flow, get_run_logger, task, unmapped
+from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
 from prefect.futures import wait
 from prefect_dask import DaskTaskRunner  # type: ignore[attr-defined]
@@ -14,13 +14,11 @@ from client import HecateClient
 from sinks.redis import HistoricalRedisSink
 
 from flows import get_system_checkpoint
+from flows.adaptive_memory_controller import AdaptiveMemoryController
 from models import EpochNumber
-from flows.adaptive_memory_controller import AdaptiveMemoryConfig  # Legacy, remove usage below
-from sinks.backpressure_monitor import RedisBackpressureConfig  # Legacy, remove usage below
 from config.settings import (
     get_batch_settings,
-    get_dask_settings,
-    get_redis_settings,
+    get_dask_settings
 )
 
 
@@ -59,17 +57,20 @@ def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
 async def sync_epoch(
     epoch: EpochNumber,
     batch_size: int = 1000,
+    memory_controller: AdaptiveMemoryController | None = None,
 ) -> EpochNumber:
     """
     Synchronize a specific epoch by fetching blocks of data in batches and relaying them.
     The function streams block data from the ledger for a given epoch, sends them to a sink in
     configurable batch sizes and marks the epoch as complete once fully processed.
-    It adapts the batch size based on memory pressure and pauses if Redis backpressure is high.
+    Dynamically adjusts batch size based on memory pressure using the adaptive memory controller.
 
     :param epoch: The epoch number to synchronize.
     :type epoch: EpochNumber
-    :param batch_size: The number of blocks to process in each batch.
+    :param batch_size: The initial number of blocks to process in each batch.
     :type batch_size: int
+    :param memory_controller: Optional memory controller for adaptive batch sizing.
+    :type memory_controller: AdaptiveMemoryController | None
     :return: The updated epoch number indicating the last successfully synced epoch.
     :rtype: EpochNumber
     """
@@ -88,6 +89,7 @@ async def sync_epoch(
             batch: list[Block] = []
             blocks_processed = 0
             last_height: int | None = None
+            current_batch_size = batch_size
 
             async for blocks in client.epoch_blocks(epoch):
                 for block in blocks:
@@ -95,7 +97,16 @@ async def sync_epoch(
                         continue
                     batch.append(block)
                     last_height = block.height
-                    if len(batch) >= batch_size:
+                    
+                    # Adapt batch size using memory controller (when needed)
+                    if memory_controller and len(batch) % 1000 == 0:  # Check every 1000 blocks
+                        current_batch_size = await memory_controller.handle_memory_management(
+                            epoch,
+                            batch_size,
+                            current_batch_size
+                        )
+                    
+                    if len(batch) >= current_batch_size:
                         await sink.send_batch(batch, epoch=epoch)
                         blocks_processed += len(batch)
                         logger.debug(f"Sent batch of {len(batch)} blocks")
@@ -139,8 +150,7 @@ async def historical_sync_flow(
     *,
     start_epoch: EpochNumber = FIRST_SHELLEY_EPOCH,
     batch_size: int | None = None,
-    concurrent_epochs: int | None = None,
-    backpressure_config: RedisBackpressureConfig | None = None
+    concurrent_epochs: int | None = None
 ) -> None:
     """
     Retrieves and relays data across a range of epochs against the system checkpoint.
@@ -156,16 +166,8 @@ async def historical_sync_flow(
     :type start_epoch: EpochNumber
     :param batch_size: The number of records processed per batch for synchronization. Defaults to 100.
     :type batch_size: int
-    :param min_batch_size: The minimum batch size to use when memory is constrained.
-    :type min_batch_size: int
     :param concurrent_epochs: The number of epochs to process concurrently before waiting. Defaults to 6.
     :type concurrent_epochs: int
-    :param memory_config: Configuration for the adaptive memory controller.
-    :type memory_config: AdaptiveMemoryConfig | None
-    :param backpressure_config: Configuration for the Redis backpressure monitor.
-    :type backpressure_config: RedisBackpressureConfig | None
-    :param snapshot_frequency: How often to take snapshots (every N batches). Uses settings default if not provided.
-    :type snapshot_frequency: int | None
     :return: This flow does not return any value.
     :rtype: None
     """
@@ -176,18 +178,11 @@ async def historical_sync_flow(
     batch_settings = get_batch_settings()
     final_batch_size = batch_size or batch_settings.base_size
     final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers
+    
+    # Create adaptive memory controller for batch size optimization
+    memory_controller = AdaptiveMemoryController()
 
-    redis_settings = get_redis_settings()
-    effective_backpressure_config = backpressure_config or RedisBackpressureConfig(
-        max_depth=redis_settings.max_stream_depth,
-        check_interval=redis_settings.check_interval,
-    )
-
-    async with HistoricalRedisSink(
-        start_epoch=start_epoch,
-        backpressure_config=effective_backpressure_config,
-        redis_settings=redis_settings,
-    ) as sink:
+    async with HistoricalRedisSink(start_epoch=start_epoch) as sink:
         last = await sink.get_last_synced_epoch()
 
     if last > start_epoch:
@@ -219,8 +214,9 @@ async def historical_sync_flow(
         )
 
         futures = sync_epoch.map(
-            epoch=batch_epochs,
+            epoch=batch_epochs, 
             batch_size=final_batch_size,
+            memory_controller=memory_controller
         )
         wait(futures)
 

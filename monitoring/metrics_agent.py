@@ -1,15 +1,14 @@
 import asyncio
-import logging
+import time
 from dataclasses import dataclass
 from typing import Dict
 
-import redis.asyncio as redis
 import psutil
-import time
-from prefect import flow, task
-from config.settings import get_redis_settings
+import redis.asyncio as redis
+from prefect import flow, get_run_logger, task
 
-logger = logging.getLogger(__name__)
+from config.settings import get_monitoring_settings, get_redis_settings
+
 
 @dataclass
 class SystemMetrics:
@@ -74,13 +73,11 @@ class MetricsAgent:
 @task
 async def collect_and_publish_metrics() -> None:
     """Task that collects and publishes system metrics."""
-    if logger.level > logging.INFO:
-        logger.setLevel(logging.INFO)
+    logger = get_run_logger()
     agent = MetricsAgent()
     async with redis.from_url(get_redis_settings().url) as redis_client:
         agent.redis_client = redis_client
         metrics = await agent.collect_system_metrics()
-        # Publish metrics to Redis for dashboards
         log_msg = (
             f"📊 Metrics | "
             f"Memory: {metrics.memory_used_gb:.2f}GB ({metrics.memory_used_percent:.1f}%) | "
@@ -105,11 +102,13 @@ async def collect_and_publish_metrics() -> None:
 @flow(name="metrics-agent", log_prints=True)
 async def metrics_collection_flow() -> None:
     """Main flow for the metrics agent."""
+    logger = get_run_logger()
     logger.info("🔍 Starting Hecate metrics collection agent")
+    monitoring_settings = get_monitoring_settings()
     while True:
         try:
             await collect_and_publish_metrics()
-            await asyncio.sleep(30)  # Collect every 30 seconds
-        except Exception as e:
+            await asyncio.sleep(monitoring_settings.collection_interval)  # Collect every configured seconds
+        except (redis.exceptions.RedisError, psutil.Error) as e:
             logger.error(f"Error in metrics collection: {e}")
             await asyncio.sleep(60)  # Backoff in case of error
