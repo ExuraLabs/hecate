@@ -80,13 +80,13 @@ class MetricsAgent:
 @task
 async def collect_and_publish_metrics() -> None:
     """Task that collects and publishes system metrics."""
-    logger = get_run_logger()
     agent = MetricsAgent()
     async with redis.from_url(get_redis_settings().url) as redis_client:
         agent.redis_client = redis_client
+        logger = get_run_logger()
         metrics = await agent.collect_system_metrics()
         log_msg = (
-            f"📊 Metrics | "
+            f"System Metrics | "
             f"Memory: {metrics.memory_used_gb:.2f}GB ({metrics.memory_used_percent:.1f}%) | "
             f"System Load: {metrics.system_load:.2f} | "
             f"Streams: {metrics.redis_stream_depths} | "
