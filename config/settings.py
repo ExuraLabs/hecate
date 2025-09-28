@@ -69,7 +69,7 @@ class MonitoringSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=env_file, env_file_encoding="utf-8", extra="ignore"
     )
-    snapshot_frequency: int = Field(alias="SNAPSHOT_FREQUENCY", default=5)
+    collection_interval_seconds: int = Field(alias="COLLECTION_INTERVAL", default=5)
 
 
 class OgmiosSettings(BaseSettings):
