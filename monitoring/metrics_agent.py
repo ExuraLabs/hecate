@@ -74,11 +74,22 @@ class MetricsAgent:
 @task
 async def collect_and_publish_metrics() -> None:
     """Task that collects and publishes system metrics."""
+    if logger.level > logging.INFO:
+        logger.setLevel(logging.INFO)
     agent = MetricsAgent()
     async with redis.from_url(get_redis_settings().url) as redis_client:
         agent.redis_client = redis_client
         metrics = await agent.collect_system_metrics()
         # Publish metrics to Redis for dashboards
+        log_msg = (
+            f"📊 Metrics | "
+            f"Memory: {metrics.memory_used_gb:.2f}GB ({metrics.memory_used_percent:.1f}%) | "
+            f"System Load: {metrics.system_load:.2f} | "
+            f"Streams: {metrics.redis_stream_depths} | "
+            f"Active Epochs: {metrics.active_epochs} | "
+            f"Blocks/sec: {metrics.blocks_per_second:.2f} | "
+        )
+        logger.info(log_msg)
         await redis_client.xadd(
             "hecate:metrics:system", 
             {
@@ -89,19 +100,7 @@ async def collect_and_publish_metrics() -> None:
                 **{f"redis_{k}": v for k, v in metrics.redis_stream_depths.items()},
             }
         )
-        if logger.level > logging.INFO:
-            logger.setLevel(logging.INFO)
 
-        # Build a more informative log message
-        log_msg = (
-            f"📊 Metrics | "
-            f"Memory: {metrics.memory_used_gb:.2f}GB ({metrics.memory_used_percent:.1f}%) | "
-            f"Streams: {metrics.redis_stream_depths} | "
-            f"Active Epochs: {metrics.active_epochs} | "
-            f"Blocks/sec: {metrics.blocks_per_second:.2f} | "
-            f"System Load: {metrics.system_load:.2f}"
-        )
-        logger.info(log_msg)
 
 @flow(name="metrics-agent", log_prints=True)
 async def metrics_collection_flow() -> None:
