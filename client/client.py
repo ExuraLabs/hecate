@@ -1,41 +1,46 @@
 from typing import Any, AsyncIterator
+import logging
 
 from ogmios import Block, Point
 from ogmios.client import Client as OgmiosClient
 from ogmios.model.ogmios_model import Jsonrpc
 import orjson as json
-from websockets import connect, ClientConnection
+from websockets import ClientConnection
+from pydantic import WebsocketUrl
 
 from client.chainsync import AsyncFindIntersection, AsyncNextBlock
 from client.ledgerstate import AsyncEpoch, AsyncEraSummaries, AsyncTip
-from client.multi_source_balancer import MultiSourceBalancer
+from network.endpoint_scout import EndpointScout
+from config.settings import get_ogmios_settings
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
 
 from models import EpochNumber
 
+logger = logging.getLogger(__name__)
+
 
 class HecateClient(OgmiosClient):  # type: ignore[misc]
     """
-    Async Ogmios connection client with multi-source load balancing.
+    Async Ogmios connection client with EndpointScout for intelligent connection management.
 
     Asynchronous wrapper of the Ogmios websockets client.
     Inherits from OgmiosClient for type compatibility but implements
     its own async connection management as well as additional, higher-level methods.
-    It uses a MultiSourceBalancer to distribute requests across multiple Ogmios instances.
+    It uses an EndpointScout to intelligently manage WebSocket connections to multiple Ogmios instances.
 
-    :param balancer: A MultiSourceBalancer instance. If not provided, it will be
-        created from environment variables.
+    :param endpoint_scout: An EndpointScout instance for connection management. If not provided, 
+        it will be created from environment variables.
     :param rpc_version: The JSON-RPC version to use.
     """
 
     # noinspection PyMissingConstructor
     def __init__(
         self,
-        balancer: MultiSourceBalancer | None = None,
+        endpoint_scout: EndpointScout | None = None,
         rpc_version: Jsonrpc = Jsonrpc.field_2_0,
     ) -> None:
         self.rpc_version = rpc_version
-        self.balancer = balancer or MultiSourceBalancer.from_env()
+        self.endpoint_scout = endpoint_scout or self._create_default_scout()
         self.connection: ClientConnection | None = None
 
         # chainsync methods
@@ -46,85 +51,53 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         self.era_summaries = AsyncEraSummaries(self)
         self.chain_tip = AsyncTip(self)
         self.epoch = AsyncEpoch(self)
+        
+    def _create_default_scout(self) -> EndpointScout:
+        """Crea un scout con configuración por defecto desde variables de entorno."""
+        settings = get_ogmios_settings()
+        endpoints = [WebsocketUrl(ep["url"]) for ep in settings.endpoints]
+        return EndpointScout(endpoints)
 
     # Connection management
     async def __aenter__(self) -> "HecateClient":
-        # Start health checks (this will run initial check and then start periodic ones)
-        await self.balancer.start_health_checks()
-        # Now we can safely connect knowing health data is available
+        """Inicia el scout y establece conexión al entrar en el context manager."""
+        await self.endpoint_scout.start_monitoring()
         await self.connect()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Close client connection and stop health checks when finished"""
-        # Always stop health checks when using context manager
-        await self.balancer.stop_health_checks()
+        """Cierra conexión y detiene monitoreo al salir del context manager."""
         await self.close()
+        await self.endpoint_scout.stop_monitoring()
 
     async def connect(self, **connection_params: Any) -> None:
-        """Connect to the best available Ogmios server from the balancer."""
-        if self.connection is not None:
-            await self.connection.close()
-
-        # Ensure health checks are started before attempting to connect
-        await self.balancer.start_health_checks()
-
-        # Try to connect to multiple endpoints if the first one fails
-        max_attempts = len(self.balancer.endpoints)
-        for attempt in range(max_attempts):
-            try:
-                endpoint = await self.balancer.get_best_endpoint()
-                print(
-                    f"Attempting connection {attempt + 1}/{max_attempts} to Ogmios at {endpoint.url}"
-                )
-                self.connection = await connect(str(endpoint.url), **connection_params)
-                print(f"Successfully connected to {endpoint.url}")
-                if not endpoint.is_healthy:
-                    endpoint.is_healthy = True
-                return
-
-            except OSError as e:
-                print(
-                    f"Connection attempt {attempt + 1} failed for {endpoint.url}: {type(e).__name__}"
-                )
-                endpoint.is_healthy = False
-                if attempt < max_attempts - 1:
-                    print("Trying next available endpoint...")
-                    continue
-                else:
-                    self._raise_connection_error(e)
-
-    def _raise_connection_error(self, last_exception: Exception) -> None:
-        """Raise a clean, user-friendly connection error."""
-
-        error_msg = (
-            f"Unable to connect to any Ogmios endpoint!\n"
-            f"Please check:\n"
-            f" - Are your Ogmios servers running?\n"
-            f" - Are the URLs in OGMIOS_ENDPOINTS correct?\n"
-            f" - Is there a network connectivity issue?\n"
-            f"Last error: {type(last_exception).__name__}: {last_exception}"
-        )
-
-        raise ConnectionError(error_msg) from last_exception
+        """Establece conexión usando el endpoint scout."""
+        if self.connection and hasattr(self.connection, 'open') and self.connection.open:
+            return
+            
+        try:
+            self.connection = await self.endpoint_scout.get_best_connection()
+            logger.info("✅ Connected to Ogmios endpoint via EndpointScout")
+        except ConnectionError as e:
+            logger.error(f"❌ Failed to establish connection: {e}")
+            raise
 
     async def close(self) -> None:
-        """Close the connection to the Ogmios server"""
+        """Cierra la conexión al servidor Ogmios."""
         if self.connection:
             await self.connection.close()
             self.connection = None
 
     async def shutdown(self) -> None:
-        """Shutdown the client completely, stopping health checks and closing connections.
-        Use this when using the client without context manager (direct connect() pattern)."""
-        await self.balancer.stop_health_checks()
+        """Apaga el cliente completamente, deteniendo monitoreo y cerrando conexiones."""
+        await self.endpoint_scout.close_all_connections()
         await self.close()
 
     async def send(self, request: str) -> None:
-        """Send a request to the Ogmios server asynchronously.
-        If the connection is lost, it will try to reconnect to the next best endpoint.
+        """Envía una petición al servidor Ogmios de forma asíncrona.
+        Si la conexión se pierde, intentará reconectar al mejor endpoint disponible.
 
-        :param request: The request to send
+        :param request: La petición a enviar
         :type request: str
         """
         try:
@@ -133,7 +106,7 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
                 assert self.connection is not None
             await self.connection.send(request)
         except Exception:
-            # Reconnect on failure
+            # Reconectar en caso de fallo
             await self.connect()
             assert self.connection is not None
             await self.connection.send(request)

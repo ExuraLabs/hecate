@@ -6,7 +6,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-env_file = ".env.production"  # ".env.production"
+env_file = ".env"  # ".env.production"
 
 
 class OgmiosEndpointConfig(TypedDict):
