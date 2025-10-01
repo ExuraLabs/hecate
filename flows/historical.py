@@ -80,7 +80,7 @@ async def sync_epoch(
     memory_controller = AdaptiveMemoryController()
 
 
-    # Inicializar conexión dentro de la tarea para evitar problemas de serialización
+    # Initialize connection inside the task to avoid serialization issues
     scout = EndpointScout()
     await scout.start_monitoring()
     connection = await scout.get_best_connection()
