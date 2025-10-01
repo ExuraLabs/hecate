@@ -55,7 +55,6 @@ def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
 )
 async def sync_epoch(
     epoch: EpochNumber,
-    connection: ClientConnection,
     batch_size: int = 1000,
 ) -> EpochNumber:
     """
@@ -80,7 +79,11 @@ async def sync_epoch(
     # Local memory controller instance
     memory_controller = AdaptiveMemoryController()
 
-    # Create client with injected connection
+
+    # Inicializar conexión dentro de la tarea para evitar problemas de serialización
+    scout = EndpointScout()
+    await scout.start_monitoring()
+    connection = await scout.get_best_connection()
     client = HecateClient(connection)
 
     async with HistoricalRedisSink() as sink:
@@ -220,20 +223,8 @@ async def historical_sync_flow(
                 f"epochs {batch_epochs[0]} to {batch_epochs[-1]}"
             )
 
-            # Get connections for this batch
-            connections = []
-            for _ in batch_epochs:
-                try:
-                    conn = await scout.get_best_connection()
-                    connections.append(conn)
-                except Exception as e:
-                    logger.error(f"Failed to get connection: {e}")
-                    raise
-
-            # Submit tasks with connections
             futures = sync_epoch.map(
                 epoch=batch_epochs,
-                connection=connections,
                 batch_size=final_batch_size,
             )
             wait(futures)
