@@ -87,15 +87,15 @@ class AdaptiveMemoryController:
             "AdaptiveMemoryController initialized with limit: "
             f"{self.config.memory_limit_gb:.2f} GB"
         )
-        self.logger.info(
+        self.logger.debug(
             f"  - Warning threshold:  {self.warning_limit_gb:.2f} GB "
             f"({self.config.warning_threshold:.0%})"
         )
-        self.logger.info(
+        self.logger.debug(
             f"  - Critical threshold: {self.critical_limit_gb:.2f} GB "
             f"({self.config.critical_threshold:.0%})"
         )
-        self.logger.info(
+        self.logger.debug(
             f"  - Emergency threshold: {self.emergency_limit_gb:.2f} GB "
             f"({self.config.emergency_threshold:.0%})"
         )
