@@ -8,7 +8,7 @@ from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
 from prefect.futures import wait
 from prefect_dask import DaskTaskRunner  # type: ignore[attr-defined]
-from websockets import ClientConnection
+
 
 from constants import FIRST_SHELLEY_EPOCH
 from client import HecateClient
@@ -186,8 +186,15 @@ async def historical_sync_flow(
     final_batch_size = batch_size or batch_settings.base_size
     final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers
 
+
     # Initialize EndpointScout for connection management
     scout = EndpointScout()
+
+    # Start metrics collection in the background
+    from monitoring.metrics_agent import collect_and_publish_metrics
+    import asyncio
+    logger.info("🚦 Starting metrics collection task before historical sync...")
+    metrics_task = asyncio.create_task(collect_and_publish_metrics())
 
     async with HistoricalRedisSink(start_epoch=start_epoch) as sink:
         last = await sink.get_last_synced_epoch()
@@ -234,9 +241,13 @@ async def historical_sync_flow(
                 f"✅ Completed batch {batch_num}/{total_batches} in {batch_end - batch_start:.2f}s"
             )
 
+
     finally:
         # Cleanup connections
         await scout.close_all_connections()
 
     flow_end = time.perf_counter()
     logger.info(f"🏁 Historical sync complete in {flow_end - flow_start:.2f}s")
+
+    if metrics_task:
+        metrics_task.cancel()

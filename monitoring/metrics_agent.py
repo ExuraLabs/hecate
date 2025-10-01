@@ -1,13 +1,12 @@
-import asyncio
 import time
 from dataclasses import dataclass
 from typing import Dict
 
 import psutil
 import redis.asyncio as redis
-from prefect import flow, get_run_logger, task
+from prefect import get_run_logger, task
 
-from config.settings import get_monitoring_settings, get_redis_settings
+from config.settings import get_redis_settings
 
 
 @dataclass
@@ -104,18 +103,3 @@ async def collect_and_publish_metrics() -> None:
                 **{f"redis_{k}": v for k, v in metrics.redis_stream_depths.items()},
             },
         )
-
-
-@flow(name="metrics-agent", log_prints=True)
-async def metrics_collection_flow() -> None:
-    """Main flow for the metrics agent."""
-    logger = get_run_logger()
-    logger.info("🔍 Starting Hecate metrics collection agent")
-    monitoring_settings = get_monitoring_settings()
-    while True:
-        try:
-            await collect_and_publish_metrics()
-            await asyncio.sleep(monitoring_settings.collection_interval_seconds)
-        except (redis.exceptions.RedisError, psutil.Error) as e:
-            logger.error(f"Error in metrics collection: {e}")
-            await asyncio.sleep(60)  # Backoff in case of error
