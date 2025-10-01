@@ -8,9 +8,11 @@ from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
 from prefect.futures import wait
 from prefect_dask import DaskTaskRunner  # type: ignore[attr-defined]
+from websockets import ClientConnection
 
 from constants import FIRST_SHELLEY_EPOCH
 from client import HecateClient
+from network.endpoint_scout import EndpointScout
 from sinks.redis import HistoricalRedisSink
 
 from flows import get_system_checkpoint
@@ -53,6 +55,7 @@ def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
 )
 async def sync_epoch(
     epoch: EpochNumber,
+    connection: ClientConnection,
     batch_size: int = 1000,
 ) -> EpochNumber:
     """
@@ -63,6 +66,8 @@ async def sync_epoch(
 
     :param epoch: The epoch number to synchronize.
     :type epoch: EpochNumber
+    :param connection: An active WebSocket connection to an Ogmios server.
+    :type connection: ClientConnection
     :param batch_size: The initial number of blocks to process in each batch.
     :type batch_size: int
     :return: The updated epoch number indicating the last successfully synced epoch.
@@ -72,13 +77,13 @@ async def sync_epoch(
     epoch_start = time.perf_counter()
     logger.debug(f"▶️  Starting sync for epoch {epoch}")
 
-    # Instancia local del controlador de memoria
+    # Local memory controller instance
     memory_controller = AdaptiveMemoryController()
 
-    async with (
-        HecateClient() as client,
-        HistoricalRedisSink() as sink,
-    ):
+    # Create client with injected connection
+    client = HecateClient(connection)
+
+    async with HistoricalRedisSink() as sink:
         original_block_init = Block.__init__
         Block.__init__ = fast_block_init
         try:
@@ -178,6 +183,9 @@ async def historical_sync_flow(
     final_batch_size = batch_size or batch_settings.base_size
     final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers
 
+    # Initialize EndpointScout for connection management
+    scout = EndpointScout()
+
     async with HistoricalRedisSink(start_epoch=start_epoch) as sink:
         last = await sink.get_last_synced_epoch()
 
@@ -190,35 +198,54 @@ async def historical_sync_flow(
     target = get_system_checkpoint()
     epochs = list(range(start_epoch, target + 1))
     total_epochs = len(epochs)
+
     logger.info(
         f"Processing {total_epochs} epochs in batches of {final_concurrent_epochs}"
     )
 
-    for i in range(0, total_epochs, final_concurrent_epochs):
-        batch_start = time.perf_counter()
-        batch_epochs = epochs[i : i + final_concurrent_epochs]
-        batch_num = (i // final_concurrent_epochs) + 1
-        total_batches = (
-            total_epochs + final_concurrent_epochs - 1
-        ) // final_concurrent_epochs
+    try:
+        # Start monitoring connections
+        await scout.start_monitoring()
 
-        logger.info(
-            (
+        for i in range(0, total_epochs, final_concurrent_epochs):
+            batch_start = time.perf_counter()
+            batch_epochs = epochs[i : i + final_concurrent_epochs]
+            batch_num = (i // final_concurrent_epochs) + 1
+            total_batches = (
+                total_epochs + final_concurrent_epochs - 1
+            ) // final_concurrent_epochs
+
+            logger.info(
                 f"🔄 Starting batch {batch_num}/{total_batches}: "
                 f"epochs {batch_epochs[0]} to {batch_epochs[-1]}"
             )
-        )
 
-        futures = sync_epoch.map(
-            epoch=batch_epochs,
-            batch_size=final_batch_size,
-        )
-        wait(futures)
+            # Get connections for this batch
+            connections = []
+            for _ in batch_epochs:
+                try:
+                    conn = await scout.get_best_connection()
+                    connections.append(conn)
+                except Exception as e:
+                    logger.error(f"Failed to get connection: {e}")
+                    raise
 
-        batch_end = time.perf_counter()
-        logger.info(
-            f"✅ Completed batch {batch_num}/{total_batches} in {batch_end - batch_start:.2f}s"
-        )
+            # Submit tasks with connections
+            futures = sync_epoch.map(
+                epoch=batch_epochs,
+                connection=connections,
+                batch_size=final_batch_size,
+            )
+            wait(futures)
+
+            batch_end = time.perf_counter()
+            logger.info(
+                f"✅ Completed batch {batch_num}/{total_batches} in {batch_end - batch_start:.2f}s"
+            )
+
+    finally:
+        # Cleanup connections
+        await scout.close_all_connections()
 
     flow_end = time.perf_counter()
     logger.info(f"🏁 Historical sync complete in {flow_end - flow_start:.2f}s")

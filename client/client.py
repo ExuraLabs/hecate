@@ -6,14 +6,10 @@ from ogmios.client import Client as OgmiosClient
 from ogmios.model.ogmios_model import Jsonrpc
 import orjson as json
 from websockets import ClientConnection
-from pydantic import WebsocketUrl
 
 from client.chainsync import AsyncFindIntersection, AsyncNextBlock
 from client.ledgerstate import AsyncEpoch, AsyncEraSummaries, AsyncTip
-from network.endpoint_scout import EndpointScout
-from config.settings import get_ogmios_settings
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
-
 from models import EpochNumber
 
 logger = logging.getLogger(__name__)
@@ -21,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class HecateClient(OgmiosClient):  # type: ignore[misc]
     """
-    Async Ogmios connection client with EndpointScout for intelligent connection management.
+    Async Ogmios connection client.
 
     Asynchronous wrapper of the Ogmios websockets client.
     Inherits from OgmiosClient for type compatibility but implements
@@ -36,12 +32,11 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
     # noinspection PyMissingConstructor
     def __init__(
         self,
-        endpoint_scout: EndpointScout | None = None,
+        connection: ClientConnection,
         rpc_version: Jsonrpc = Jsonrpc.field_2_0,
     ) -> None:
         self.rpc_version = rpc_version
-        self.endpoint_scout = endpoint_scout or self._create_default_scout()
-        self.connection: ClientConnection | None = None
+        self.connection = connection
 
         # chainsync methods
         self.find_intersection = AsyncFindIntersection(self)
@@ -52,83 +47,24 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         self.chain_tip = AsyncTip(self)
         self.epoch = AsyncEpoch(self)
 
-    def _create_default_scout(self) -> EndpointScout:
-        """Crea un scout con configuración por defecto desde variables de entorno."""
-        settings = get_ogmios_settings()
-        endpoints = [WebsocketUrl(ep["url"]) for ep in settings.endpoints]
-        return EndpointScout(endpoints)
-
-    # Connection management
-    async def __aenter__(self) -> "HecateClient":
-        """Inicia el scout y establece conexión al entrar en el context manager."""
-        await self.endpoint_scout.start_monitoring()
-        await self.connect()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Cierra conexión y detiene monitoreo al salir del context manager."""
-        await self.close()
-        await self.endpoint_scout.stop_monitoring()
-
-    async def connect(self, **connection_params: Any) -> None:
-        """Establece conexión usando el endpoint scout."""
-        if (
-            self.connection
-            and hasattr(self.connection, "open")
-            and self.connection.open
-        ):
-            return
-
-        try:
-            self.connection = await self.endpoint_scout.get_best_connection()
-            logger.info("✅ Connected to Ogmios endpoint via EndpointScout")
-        except ConnectionError as e:
-            logger.error(f"❌ Failed to establish connection: {e}")
-            raise
-
-    async def close(self) -> None:
-        """Cierra la conexión al servidor Ogmios."""
-        if self.connection:
-            await self.connection.close()
-            self.connection = None
-
-    async def shutdown(self) -> None:
-        """Apaga el cliente completamente, deteniendo monitoreo y cerrando conexiones."""
-        await self.endpoint_scout.close_all_connections()
-        await self.close()
-
     async def send(self, request: str) -> None:
-        """Envía una petición al servidor Ogmios de forma asíncrona.
-        Si la conexión se pierde, intentará reconectar al mejor endpoint disponible.
-
-        :param request: La petición a enviar
-        :type request: str
-        """
-        try:
-            if not self.connection:
-                await self.connect()
-                assert self.connection is not None
-            await self.connection.send(request)
-        except Exception:
-            # Reconectar en caso de fallo
-            await self.connect()
-            assert self.connection is not None
-            await self.connection.send(request)
+        """Send a request to the Ogmios server."""
+        if not (self.connection or hasattr(self.connection, "open") or self.connection.open):
+            raise ConnectionError("No active connection available")
+        
+        await self.connection.send(request)
 
     async def receive(self) -> dict[str, Any]:
-        """Receive a response from the Ogmios server
-
-        :return: Request response
-        """
-        if self.connection is None:
-            await self.connect()
-            assert self.connection is not None
+        """Receive a response from the Ogmios server."""
+        if not (self.connection or hasattr(self.connection, "open") or self.connection.open):
+            raise ConnectionError("No active connection available")
 
         raw_response = await self.connection.recv()
         resp: dict[str, Any] = json.loads(raw_response)
+        
         if resp.get("version"):
             raise Exception(
-                "Invalid Ogmios version. ogmios-python only supports Ogmios server version v6.0.0 and above."
+                "Invalid Ogmios version. Only supports Ogmios server version v6.0.0 and above."
             )
         return resp
 
