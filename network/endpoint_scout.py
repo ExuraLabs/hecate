@@ -309,7 +309,6 @@ class EndpointScout:
     async def start_monitoring(self) -> None:
         """Start continuous endpoint monitoring."""
         if self._monitoring_task and not self._monitoring_task.done():
-            logger.debug("Monitoring task already running")
             return
 
         self._monitoring_task = asyncio.create_task(self._monitoring_loop())

@@ -1,3 +1,4 @@
+from asyncio.log import logger
 import time
 from typing import Any
 from models import BlockHeight
@@ -56,91 +57,113 @@ def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
 async def sync_epoch(
     epoch: EpochNumber,
     batch_size: int = 1000,
+    scout: EndpointScout,
 ) -> EpochNumber:
     """
     Synchronize a specific epoch by fetching blocks of data in batches and relaying them.
-    The function streams block data from the ledger for a given epoch, sends them to a sink in
-    configurable batch sizes and marks the epoch as complete once fully processed.
-    Dynamically adjusts batch size based on memory pressure using the adaptive memory controller.
-
-    :param epoch: The epoch number to synchronize.
-    :type epoch: EpochNumber
-    :param connection: An active WebSocket connection to an Ogmios server.
-    :type connection: ClientConnection
-    :param batch_size: The initial number of blocks to process in each batch.
-    :type batch_size: int
-    :return: The updated epoch number indicating the last successfully synced epoch.
-    :rtype: EpochNumber
     """
     logger = get_run_logger()
     epoch_start = time.perf_counter()
     logger.debug(f"▶️  Starting sync for epoch {epoch}")
 
-    # Local memory controller instance
-    memory_controller = AdaptiveMemoryController()
-
-
-    # Initialize connection inside the task to avoid serialization issues
-    scout = EndpointScout()
-    await scout.start_monitoring()
     connection = await scout.get_best_connection()
-    client = HecateClient(connection)
-
-    async with HistoricalRedisSink() as sink:
-        original_block_init = Block.__init__
-        Block.__init__ = fast_block_init
-        try:
-            resume_height = await sink.get_epoch_resume_height(epoch)
-            batch: list[Block] = []
-            blocks_processed = 0
-            last_height: int | None = None
-            current_batch_size = batch_size
-
-            async for blocks in client.epoch_blocks(epoch):
-                for block in blocks:
-                    if resume_height and block.height <= resume_height:
-                        continue
-                    batch.append(block)
-                    last_height = block.height
-
-                    # Adapt batch size using memory controller (when needed)
-                    if len(batch) % 1000 == 0:  # Check every 1000 blocks
-                        current_batch_size = (
-                            await memory_controller.handle_memory_management(
-                                epoch, batch_size, current_batch_size
-                            )
-                        )
-
-                    if len(batch) >= current_batch_size:
-                        await sink.send_batch(batch, epoch=epoch)
-                        blocks_processed += len(batch)
-                        logger.debug(f"Sent batch of {len(batch)} blocks")
-                        batch.clear()
-
-            if batch:
-                await sink.send_batch(batch, epoch=epoch)
-                blocks_processed += len(batch)
-                logger.debug(f"Sent final batch of {len(batch)} blocks")
-                if batch:
-                    last_height = batch[-1].height
-
-            if last_height is None:
-                logger.warning(
-                    f"No blocks processed for epoch {epoch}, cannot mark complete."
-                )
-                return epoch
-            await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
-            logger.info(
-                f"✅ Epoch {epoch} completed: {blocks_processed} blocks processed"
-            )
+    
+    async with (HistoricalRedisSink() as sink, HecateClient(connection) as client):
+        last_height = await _process_epoch_blocks(
+            client, sink, epoch, batch_size, logger
+        )
+        
+        if last_height is None:
+            logger.warning(f"No blocks processed for epoch {epoch}, cannot mark complete.")
             return epoch
-        finally:
-            # Restore original Block.__init__ to avoid side effects for other tasks
-            Block.__init__ = original_block_init
+            
+        await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
+        logger.info(f"✅ Epoch {epoch} completed")
 
     epoch_end = time.perf_counter()
     logger.info(f"✅ Epoch {epoch} sync complete in {epoch_end - epoch_start:.2f}s")
     return epoch
+
+
+async def _process_epoch_blocks(
+    client: HecateClient,
+    sink: HistoricalRedisSink,
+    epoch: EpochNumber,
+    initial_batch_size: int,
+    logger,
+) -> int | None:
+    """Process all blocks for an epoch, handling batching and memory management."""
+    original_block_init = Block.__init__
+    Block.__init__ = fast_block_init
+    
+    try:
+        return await _stream_and_batch_blocks(
+            client, sink, epoch, initial_batch_size, logger
+        )
+    finally:
+        Block.__init__ = original_block_init
+
+
+async def _stream_and_batch_blocks(
+    client: HecateClient,
+    sink: HistoricalRedisSink,
+    epoch: EpochNumber,
+    initial_batch_size: int,
+    logger,
+) -> int | None:
+    """Stream blocks and process them in adaptive batches."""
+    resume_height = await sink.get_epoch_resume_height(epoch)
+    memory_controller = AdaptiveMemoryController()
+    
+    batch: list[Block] = []
+    blocks_processed = 0
+    last_height: int | None = None
+    current_batch_size = initial_batch_size
+
+    async for blocks in client.epoch_blocks(epoch):
+        for block in blocks:
+            if _should_skip_block(block, resume_height):
+                continue
+                
+            batch.append(block)
+            last_height = block.height
+
+            # Adapt batch size periodically
+            if len(batch) % 1000 == 0:
+                current_batch_size = await memory_controller.handle_memory_management(
+                    epoch, initial_batch_size, current_batch_size
+                )
+
+            # Send batch when it reaches the target size
+            if len(batch) >= current_batch_size:
+                await _send_batch_and_log(sink, batch, epoch, logger)
+                blocks_processed += len(batch)
+                batch.clear()
+
+    # Send any remaining blocks
+    if batch:
+        await _send_batch_and_log(sink, batch, epoch, logger)
+        blocks_processed += len(batch)
+        if batch:
+            last_height = batch[-1].height
+
+    return last_height
+
+
+def _should_skip_block(block: Block, resume_height: BlockHeight | None) -> bool:
+    """Check if a block should be skipped based on resume height."""
+    return resume_height is not None and block.height <= resume_height
+
+
+async def _send_batch_and_log(
+    sink: HistoricalRedisSink,
+    batch: list[Block],
+    epoch: EpochNumber,
+    logger,
+) -> None:
+    """Send a batch to the sink and log the operation."""
+    await sink.send_batch(batch, epoch=epoch)
+    logger.debug(f"Sent batch of {len(batch)} blocks for epoch {epoch}")
 
 
 @flow(  # type: ignore[arg-type]
@@ -193,7 +216,7 @@ async def historical_sync_flow(
     # Start metrics collection in the background
     from monitoring.metrics_agent import collect_and_publish_metrics
     import asyncio
-    logger.info("🚦 Starting metrics collection task before historical sync...")
+    logger.info("Starting metrics collection task before historical sync...")
     metrics_task = asyncio.create_task(collect_and_publish_metrics())
 
     async with HistoricalRedisSink(start_epoch=start_epoch) as sink:
@@ -216,31 +239,15 @@ async def historical_sync_flow(
     try:
         # Start monitoring connections
         await scout.start_monitoring()
-
         for i in range(0, total_epochs, final_concurrent_epochs):
-            batch_start = time.perf_counter()
-            batch_epochs = epochs[i : i + final_concurrent_epochs]
-            batch_num = (i // final_concurrent_epochs) + 1
-            total_batches = (
-                total_epochs + final_concurrent_epochs - 1
-            ) // final_concurrent_epochs
-
-            logger.info(
-                f"🔄 Starting batch {batch_num}/{total_batches}: "
-                f"epochs {batch_epochs[0]} to {batch_epochs[-1]}"
+            process_batch(
+                total_epochs,
+                final_concurrent_epochs,
+                i,
+                epochs,
+                final_batch_size,
+                scout
             )
-
-            futures = sync_epoch.map(
-                epoch=batch_epochs,
-                batch_size=final_batch_size,
-            )
-            wait(futures)
-
-            batch_end = time.perf_counter()
-            logger.info(
-                f"✅ Completed batch {batch_num}/{total_batches} in {batch_end - batch_start:.2f}s"
-            )
-
 
     finally:
         # Cleanup connections
@@ -251,3 +258,36 @@ async def historical_sync_flow(
 
     if metrics_task:
         metrics_task.cancel()
+
+    
+def process_batch(
+        total_epochs,
+        final_concurrent_epochs,
+        i,
+        epochs,
+        final_batch_size,
+        scout
+    ):
+    batch_start = time.perf_counter()
+    batch_epochs = epochs[i : i + final_concurrent_epochs]
+    batch_num = (i // final_concurrent_epochs) + 1
+    total_batches = (
+        total_epochs + final_concurrent_epochs - 1
+    ) // final_concurrent_epochs
+
+    logger.info(
+        f"🔄 Starting batch {batch_num}/{total_batches}: "
+        f"epochs {batch_epochs[0]} to {batch_epochs[-1]}"
+    )
+
+    futures = sync_epoch.map(
+        epoch=batch_epochs,
+        batch_size=final_batch_size,
+        scout=scout
+    )
+    wait(futures)
+
+    batch_end = time.perf_counter()
+    logger.info(
+        f"✅ Completed batch {batch_num}/{total_batches} in {batch_end - batch_start:.2f}s"
+    )
