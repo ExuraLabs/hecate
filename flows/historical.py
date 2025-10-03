@@ -261,13 +261,16 @@ async def historical_sync_flow(
 
     
 def process_batch(
-        total_epochs,
-        final_concurrent_epochs,
-        i,
-        epochs,
-        final_batch_size,
-        scout
-    ):
+    total_epochs: int,
+    final_concurrent_epochs: int,
+    i: int,
+    epochs: list[EpochNumber],
+    final_batch_size: int,
+    scout: EndpointScout
+) -> None:
+    """
+    Process a batch of epochs concurrently using sync_epoch tasks.
+    """
     batch_start = time.perf_counter()
     batch_epochs = epochs[i : i + final_concurrent_epochs]
     batch_num = (i // final_concurrent_epochs) + 1
