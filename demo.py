@@ -4,6 +4,7 @@ from ogmios import Point
 from rich.console import Console
 
 from client import HecateClient
+from network.endpoint_scout import EndpointScout
 from constants import ERA_BOUNDARY
 from sinks import CLISink, BufferedSink
 
@@ -14,13 +15,15 @@ async def run_demo() -> None:
     console.print()
 
     sink = CLISink()
-
-    # Initialize client
-    console.print("[bold blue]Connecting to Ogmios...[/]")
-    client = HecateClient()
-    await client.connect()
+    scout = EndpointScout()
 
     try:
+        console.print("[bold blue]Connecting to Ogmios...[/]")
+        connection = await scout.get_best_connection()
+        
+        # Initialize client with connection
+        client = HecateClient(connection)
+
         # 1. Get current tip
         console.print("[bold blue]🔎 Fetching current chain tip...[/]")
         tip, _ = await client.chain_tip.execute()
@@ -100,7 +103,8 @@ async def run_demo() -> None:
         console.print(f"[bold red]Error:[/] {str(e)}")
         raise
     finally:
-        await client.close()
+        # Cleanup connections
+        await scout.close_all_connections()
         await sink.close()
 
 
