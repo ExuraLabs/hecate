@@ -20,30 +20,19 @@ from network.endpoint_scout import EndpointScout
 from sinks.redis import HistoricalRedisSink
 
 
-def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
+
+def create_fast_block(blocktype: mm.Types, **kwargs: Any) -> Block:
     """
-    Fast initialization for Block objects that bypasses Pydantic validation.
-
-    This optimized initialization directly assigns attributes from kwargs
-    without constructing or validating Pydantic models. It's designed for
-    processing historical blocks where validation is redundant.
-
-    Note:
-        This method omits all validation checks present in the original
-        implementation. Type mismatches or missing fields won't raise
-        errors, which is acceptable for historical data but potentially
-        dangerous for real-time blocks.
-
-    Performance:
-        When processing hundreds of thousands of blocks, this can significantly
-        reduce CPU without affecting correctness.
+    Fast factory for Block objects that bypasses Pydantic validation.
+    Directly assigns attributes from kwargs without validation.
+    Use ONLY for historical sync, not for real-time blocks.
     """
-    self.blocktype = blocktype
-    # Directly assign all attributes without creating _schematype
+    block = Block.__new__(Block)
+    block.blocktype = blocktype
     for key, value in kwargs.items():
-        setattr(self, key, value)
-    # Set a dummy _schematype attribute to avoid attribute errors
-    self._schematype = None
+        setattr(block, key, value)
+    block._schematype = None
+    return block
 
 
 @task(
@@ -100,10 +89,9 @@ async def _process_epoch_blocks(
     run_logger: Any,
 ) -> int | None:
     """Process all blocks for an epoch, handling batching and memory management."""
-    Block.__init__ = fast_block_init
-
+    # Usar la factory para crear bloques históricos en vez de monkey patching
     return await _stream_and_batch_blocks(
-        client, sink, epoch, initial_batch_size, run_logger
+        client, sink, epoch, initial_batch_size, run_logger, block_factory=create_fast_block
     )
 
 
@@ -113,6 +101,7 @@ async def _stream_and_batch_blocks(
     epoch: EpochNumber,
     initial_batch_size: int,
     run_logger: Any,
+    block_factory: callable | None = None,
 ) -> int | None:
     """
     Stream blocks from client and process them in adaptive batches.
@@ -143,7 +132,9 @@ async def _stream_and_batch_blocks(
             for block in blocks:
                 if _should_skip_block(block, resume_height):
                     continue
-                    
+                # Si se pasa una factory, usarla para crear el bloque
+                if block_factory:
+                    block = block_factory(block.blocktype, **block.__dict__)
                 batch.append(block)
                 last_height = block.height
 
