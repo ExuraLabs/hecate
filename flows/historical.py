@@ -1,7 +1,7 @@
-import time
 import asyncio
+import time
 from asyncio.log import logger
-from typing import Any
+from typing import Any, Callable
 
 import ogmios.model.model_map as mm
 from ogmios import Block
@@ -18,7 +18,6 @@ from models import BlockHeight, EpochNumber
 from monitoring.metrics_agent import collect_and_publish_metrics
 from network.endpoint_scout import EndpointScout
 from sinks.redis import HistoricalRedisSink
-
 
 
 def create_fast_block(blocktype: mm.Types, **kwargs: Any) -> Block:
@@ -101,8 +100,8 @@ async def _stream_and_batch_blocks(
     epoch: EpochNumber,
     initial_batch_size: int,
     run_logger: Any,
-    block_factory: callable | None = None,
-) -> int | None:
+    block_factory: Callable | None = None,
+    ) -> int | None:
     """
     Stream blocks from client and process them in adaptive batches.
     
