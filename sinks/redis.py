@@ -8,7 +8,7 @@ from prefect import get_run_logger
 from config.settings import get_redis_settings
 from constants import FIRST_SHELLEY_EPOCH
 from models import BlockHeight, EpochNumber
-from sinks.adaptive_memory_controller import AdaptiveMemoryController
+from sinks.memory_management import AdaptiveMemoryController
 from sinks.base import DataSink
 from sinks.backpressure_monitor import (
     RedisBackpressureConfig,
