@@ -8,6 +8,7 @@ from prefect import get_run_logger
 from config.settings import get_redis_settings
 from constants import FIRST_SHELLEY_EPOCH
 from models import BlockHeight, EpochNumber
+from sinks.adaptive_memory_controller import AdaptiveMemoryController
 from sinks.base import DataSink
 from sinks.backpressure_monitor import (
     RedisBackpressureConfig,
@@ -203,6 +204,9 @@ class HistoricalRedisSink(DataSink):
         self._advance_sha: str | None = None
         self.logger = get_run_logger()
         self.backpressure_monitor: RedisBackpressureMonitor | None = None
+        
+        # Initialize memory controller
+        self.memory_controller = AdaptiveMemoryController()
 
         # Initialize backpressure config using Redis settings
         backpressure_config = RedisBackpressureConfig(
@@ -248,6 +252,10 @@ class HistoricalRedisSink(DataSink):
         await self.backpressure_monitor.wait_if_paused()
 
         epoch = kwargs.pop("epoch")
+        
+        # Handle memory management before processing the batch
+        await self.memory_controller.pause_processing_if_needed(epoch)
+
         last_height = blocks[-1].height
 
         pipe = self.redis.pipeline(transaction=True)

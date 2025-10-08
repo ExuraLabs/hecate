@@ -17,7 +17,6 @@ from flows import get_system_checkpoint
 from models import BlockHeight, EpochNumber
 from monitoring.metrics_agent import collect_and_publish_metrics
 from network.endpoint_scout import EndpointScout
-from sinks.adaptive_memory_controller import AdaptiveMemoryController
 from sinks.redis import HistoricalRedisSink
 
 
@@ -108,7 +107,6 @@ async def _stream_and_batch_blocks(
 ) -> int | None:
     """Stream blocks and process them in adaptive batches."""
     resume_height = await sink.get_epoch_resume_height(epoch)
-    memory_controller = AdaptiveMemoryController()
     
     batch: list[Block] = []
     blocks_processed = 0
@@ -122,12 +120,6 @@ async def _stream_and_batch_blocks(
                 
             batch.append(block)
             last_height = block.height
-
-            # Adapt batch size periodically
-            if len(batch) % 1000 == 0:
-                current_batch_size = await memory_controller.handle_memory_management(
-                    epoch, initial_batch_size, current_batch_size
-                )
 
             # Send batch when it reaches the target size
             if len(batch) >= current_batch_size:
