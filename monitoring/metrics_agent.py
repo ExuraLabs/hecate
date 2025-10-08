@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -129,13 +130,12 @@ class MetricsAgent:
 async def collect_and_publish_metrics() -> None:
     """Task that collects and publishes system metrics."""
     logger = get_run_logger()
-    
+
     try:
         agent = MetricsAgent()
         async with redis.from_url(get_redis_settings().url) as redis_client:
             agent.redis_client = redis_client
             metrics = await agent.collect_system_metrics()
-            
             # Log metrics
             active_epochs_str = f"[{', '.join(map(str, metrics.active_epochs))}]" if metrics.active_epochs else "[]"
             logger.info(
@@ -148,10 +148,11 @@ async def collect_and_publish_metrics() -> None:
                 active_epochs_str,
                 metrics.blocks_per_second
             )
-            
             # Publish to Redis stream
             await _publish_metrics_to_redis(redis_client, metrics)
-            
+    except asyncio.CancelledError:
+        logger.info("Metrics collection task cancelled cleanly.")
+        # Aquí puedes hacer limpieza adicional si es necesario
     except (ConnectionError, TimeoutError) as e:
         logger.error("Redis connection failed: %s", e)
     except (OSError, MemoryError) as e:
