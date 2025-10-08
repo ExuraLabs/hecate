@@ -1,6 +1,5 @@
 import time
 from dataclasses import dataclass
-from typing import Dict
 
 import psutil
 import redis.asyncio as redis
@@ -16,7 +15,7 @@ class SystemMetrics:
     timestamp: float
     memory_used_gb: float
     memory_used_percent: float
-    redis_stream_depths: Dict[str, int]
+    redis_stream_depths: dict[str, int]
     active_epochs: list[int]
     blocks_per_second: float
     system_load: float
@@ -52,18 +51,24 @@ class MetricsAgent:
 
         # Calculate blocks per second (BPS) using stream length delta and time interval
         now = time.perf_counter()
-        blocks_per_second = 0.0
-        if data_stream_len is not None:
-            if (
-                self._last_data_stream_len is not None
-                and self._last_check_time is not None
-            ):
-                delta_blocks = data_stream_len - self._last_data_stream_len
-                delta_time = now - self._last_check_time
-                if delta_time > 0:
-                    blocks_per_second = delta_blocks / delta_time
-            self._last_data_stream_len = data_stream_len
-            self._last_check_time = now
+        if not all(
+            [
+                data_stream_len is not None,
+                self._last_data_stream_len is not None,
+                self._last_check_time is not None,
+            ]
+        ):
+            blocks_per_second = 0.0
+        else:
+            # Type ignore because mypy can't infer from the `all` check
+            delta_blocks = data_stream_len - self._last_data_stream_len  # type: ignore
+            delta_time = now - self._last_check_time  # type: ignore
+            blocks_per_second = (
+                delta_blocks / delta_time if delta_time > 0 else 0.0
+            )
+
+        self._last_data_stream_len = data_stream_len
+        self._last_check_time = now
 
         return SystemMetrics(
             timestamp=now,
