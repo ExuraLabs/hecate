@@ -39,13 +39,24 @@ class MetricsAgent:
         memory = psutil.virtual_memory()
         memory_used_gb = (memory.total - memory.available) / (1024**3)
         memory_used_percent = memory.percent
+        
         # Redis metrics
         stream_depths = {}
         data_stream_len = None
+        active_epochs = []
+        
         if self.redis_client:
+            # Stream depths
             for stream in ["hecate:history:data_stream", "hecate:history:event_stream"]:
                 stream_depths[stream] = await self.redis_client.xlen(stream)
             data_stream_len = stream_depths.get("hecate:history:data_stream", None)
+            
+            # Active epochs from resume_map (epochs currently being processed)
+            resume_map_data = await self.redis_client.hgetall("hecate:history:resume_map")
+            if resume_map_data:
+                active_epochs = [int(epoch) for epoch in resume_map_data.keys()]
+                active_epochs.sort()  # Sort for consistent ordering
+        
         # System metrics
         system_load = psutil.getloadavg()[0] if hasattr(psutil, "getloadavg") else 0.0
 
@@ -73,7 +84,7 @@ class MetricsAgent:
             memory_used_gb=memory_used_gb,
             memory_used_percent=memory_used_percent,
             redis_stream_depths=stream_depths,
-            active_epochs=[],  # TODO: Get from Redis
+            active_epochs=active_epochs,
             blocks_per_second=blocks_per_second,
             system_load=system_load,
         )
@@ -87,22 +98,36 @@ async def collect_and_publish_metrics() -> None:
         agent.redis_client = redis_client
         logger = get_run_logger()
         metrics = await agent.collect_system_metrics()
-        log_msg = (
-            f"System Metrics | "
-            f"Memory: {metrics.memory_used_gb:.2f}GB ({metrics.memory_used_percent:.1f}%) | "
-            f"System Load: {metrics.system_load:.2f} | "
-            f"Streams: {metrics.redis_stream_depths} | "
-            f"Active Epochs: {metrics.active_epochs} | "
-            f"Blocks/sec: {metrics.blocks_per_second:.2f} | "
+        
+        # Format active epochs for logging
+        active_epochs_str = f"[{', '.join(map(str, metrics.active_epochs))}]" if metrics.active_epochs else "[]"
+        
+        logger.info(
+            "System Metrics | Memory: %.2fGB (%.1f%%) | System Load: %.2f | "
+            "Streams: %s | Active Epochs: %s | Blocks/sec: %.2f",
+            metrics.memory_used_gb,
+            metrics.memory_used_percent,
+            metrics.system_load,
+            metrics.redis_stream_depths,
+            active_epochs_str,
+            metrics.blocks_per_second
         )
-        logger.info(log_msg)
-        await redis_client.xadd(
-            "hecate:metrics:system",
-            {
-                "timestamp": metrics.timestamp,
-                "memory_gb": metrics.memory_used_gb,
-                "memory_percent": metrics.memory_used_percent,
-                "system_load": metrics.system_load,
-                **{f"redis_{k}": v for k, v in metrics.redis_stream_depths.items()},
-            },
-        )
+        
+        # Prepare metrics for Redis stream
+        stream_data = {
+            "timestamp": metrics.timestamp,
+            "memory_gb": metrics.memory_used_gb,
+            "memory_percent": metrics.memory_used_percent,
+            "system_load": metrics.system_load,
+            "blocks_per_second": metrics.blocks_per_second,
+            "active_epochs_count": len(metrics.active_epochs),
+            **{f"redis_{k}": v for k, v in metrics.redis_stream_depths.items()},
+        }
+        
+        # Add individual active epochs (up to a reasonable limit)
+        if metrics.active_epochs:
+            # Limit to first 10 epochs to avoid excessive data
+            for i, epoch in enumerate(metrics.active_epochs[:10]):
+                stream_data[f"active_epoch_{i}"] = epoch
+        
+        await redis_client.xadd("hecate:metrics:system", stream_data)
