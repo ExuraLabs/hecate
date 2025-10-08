@@ -29,7 +29,7 @@ class AdaptiveMemoryConfig(BaseModel):
     check_interval_seconds: int
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class MemoryState:
     """Represents the current memory state of the system."""
 
@@ -39,7 +39,7 @@ class MemoryState:
     used_percent: float
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class MemoryResponse:
     """Consolidated response from memory controller operations."""
 

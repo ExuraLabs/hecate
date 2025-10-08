@@ -9,7 +9,7 @@ from pydantic import WebsocketUrl
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class ConnectionMetrics:
     """Connection metrics for an endpoint."""
 

@@ -8,7 +8,7 @@ from prefect import get_run_logger, task
 from config.settings import get_redis_settings
 
 
-@dataclass
+@dataclass(slots=True, frozen=True)
 class SystemMetrics:
     """Consolidated metrics for the Hecate system."""
 
@@ -51,13 +51,11 @@ class MetricsAgent:
 
         # Calculate blocks per second (BPS) using stream length delta and time interval
         now = time.perf_counter()
-        if not all(
-            [
+        if not all([
                 data_stream_len is not None,
                 self._last_data_stream_len is not None,
                 self._last_check_time is not None,
-            ]
-        ):
+            ]):
             blocks_per_second = 0.0
         else:
             # Type ignore because mypy can't infer from the `all` check
