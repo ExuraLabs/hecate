@@ -148,11 +148,15 @@ async def collect_and_publish_metrics() -> None:
                 active_epochs_str,
                 metrics.blocks_per_second
             )
-            # Publish to Redis stream
-            await _publish_metrics_to_redis(redis_client, metrics)
+            # Publish to Redis protected by try/except for cancellation
+            try:
+                await _publish_metrics_to_redis(redis_client, metrics)
+            except asyncio.CancelledError:
+                logger.info("Metrics collection task cancelled during publish to Redis.")
+                return
     except asyncio.CancelledError:
         logger.info("Metrics collection task cancelled cleanly.")
-        # Aquí puedes hacer limpieza adicional si es necesario
+    # Can perform additional cleanup here if necessary
     except (ConnectionError, TimeoutError) as e:
         logger.error("Redis connection failed: %s", e)
     except (OSError, MemoryError) as e:
