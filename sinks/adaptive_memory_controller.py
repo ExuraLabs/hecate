@@ -22,7 +22,7 @@ def _get_logger() -> logging.Logger:
 class AdaptiveMemoryConfig(BaseModel):
     """Configuration for the Adaptive Memory Controller."""
 
-    memory_limit_gb: float = 10.0
+    memory_limit_gb: float = 4.0
     warning_threshold: float = 0.75
     critical_threshold: float = 0.85
     emergency_threshold: float = 0.90
