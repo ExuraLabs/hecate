@@ -54,7 +54,6 @@ def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
 )
 async def sync_epoch(
     epoch: EpochNumber,
-    scout: EndpointScout,
     batch_size: int = 1000,
 ) -> EpochNumber:
     """
@@ -64,6 +63,7 @@ async def sync_epoch(
     epoch_start = time.perf_counter()
     logger.debug(f"▶️  Starting sync for epoch {epoch}")
 
+    scout = EndpointScout()
     connection = await scout.get_best_connection()
     
     async with (HistoricalRedisSink() as sink, HecateClient(connection) as client):
@@ -189,7 +189,7 @@ async def historical_sync_flow(
 
 
     # Initialize EndpointScout for connection management
-    scout = EndpointScout()
+    # scout = EndpointScout()
 
     # Start metrics collection in the background
     logger.info("Starting metrics collection task before historical sync...")
@@ -214,7 +214,7 @@ async def historical_sync_flow(
 
     try:
         # Start monitoring connections
-        await scout.start_monitoring()
+        # await scout.start_monitoring()
         for i in range(0, total_epochs, final_concurrent_epochs):
             process_batch(
                 total_epochs,
@@ -222,12 +222,13 @@ async def historical_sync_flow(
                 i,
                 epochs,
                 final_batch_size,
-                scout
+                # scout
             )
 
     finally:
         # Cleanup connections
-        await scout.close_all_connections()
+        # await scout.close_all_connections()
+        pass
 
     flow_end = time.perf_counter()
     logger.info(f"🏁 Historical sync complete in {flow_end - flow_start:.2f}s")
@@ -242,7 +243,7 @@ def process_batch(
     i: int,
     epochs: list[EpochNumber],
     final_batch_size: int,
-    scout: EndpointScout
+    # scout: EndpointScout
 ) -> None:
     """
     Process a batch of epochs concurrently using sync_epoch tasks.
@@ -261,7 +262,7 @@ def process_batch(
 
     futures = sync_epoch.map(
         epoch=batch_epochs,
-        scout=scout,
+        # scout=scout,
         batch_size=final_batch_size
     )
     wait(futures)
