@@ -254,18 +254,11 @@ class AdaptiveMemoryController:
 
         state = self._last_memory_response.state
 
-        if epoch is not None:
-            self.logger.warning(
-                f"Memory emergency threshold reached during epoch {epoch} "
-                f"({state.used_gb:.2f}GB/{state.total_gb:.2f}GB = {state.used_percent:.1%}), "
-                f"pausing processing for memory recovery"
-            )
-        else:
-            self.logger.warning(
-                f"Memory emergency threshold reached "
-                f"({state.used_gb:.2f}GB/{state.total_gb:.2f}GB = {state.used_percent:.1%}), "
-                f"pausing processing for memory recovery"
-            )
+        self.logger.warning(
+            f"Memory emergency threshold reached during epoch {epoch or '-'} "
+            f"({state.used_gb:.2f}GB/{state.total_gb:.2f}GB = {state.used_percent:.1%}), "
+            f"pausing processing for memory recovery"
+        )
 
         await asyncio.sleep(self.pause_interval_seconds)
 
@@ -273,9 +266,7 @@ class AdaptiveMemoryController:
         """
         Returns True if memory usage is above the critical threshold.
         """
-        if self._last_memory_response is None:
-            return False
-        return self._last_memory_response.should_reduce_batch
+        return getattr(self._last_memory_response, "should_reduce_batch", False)
 
     def should_pause_processing(self) -> bool:
         """
