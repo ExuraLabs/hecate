@@ -133,7 +133,9 @@ async def _stream_and_batch_blocks(
                     continue
                 # Si se pasa una factory, usarla para crear el bloque
                 if block_factory:
-                    block = block_factory(block.blocktype, **block.__dict__)
+                    block_dict = dict(block.__dict__)
+                    block_dict.pop('blocktype', None)
+                    block = block_factory(block.blocktype, **block_dict)
                 batch.append(block)
                 last_height = block.height
 
