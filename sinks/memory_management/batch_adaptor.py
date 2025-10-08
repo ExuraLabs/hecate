@@ -1,10 +1,3 @@
-"""
-Batch size adaptation based on memory decisions.
-
-This module contains the BatchSizeAdaptor class responsible for calculating
-optimal batch sizes based on memory pressure decisions.
-"""
-
 import logging
 from .memory import MemoryDecision
 
@@ -20,9 +13,7 @@ def get_contextual_logger() -> logging.Logger:
 
 class BatchSizeAdaptor:
     """
-    Responsible ONLY for calculating optimal batch sizes.
-    
-    Single Responsibility: Batch size calculations based on memory decisions.
+    Responsible ONLY for calculating optimal batch sizes
     """
 
     def __init__(self, min_batch_size: int, max_batch_size: int):

@@ -1,10 +1,3 @@
-"""
-Main adaptive memory controller - facade that orchestrates all memory management components.
-
-This module contains the main AdaptiveMemoryController class that maintains
-backward compatibility while using the new SRP-compliant internal structure.
-"""
-
 import logging
 import time
 from typing import Any

@@ -1,11 +1,3 @@
-"""
-Memory management domain: monitoring and policy evaluation.
-
-This module contains classes responsible for memory-related operations:
-- MemoryMonitor: Collects memory usage data from the system
-- MemoryPolicyEngine: Evaluates memory state and makes decisions
-"""
-
 import logging
 import time
 from dataclasses import dataclass
@@ -62,8 +54,6 @@ class MemoryDecision:
 class MemoryMonitor:
     """
     Responsible ONLY for collecting memory usage data from the system.
-    
-    Single Responsibility: Memory data collection and caching.
     """
 
     def __init__(self, config: MemoryConfig):
@@ -138,8 +128,6 @@ class MemoryMonitor:
 class MemoryPolicyEngine:
     """
     Responsible ONLY for evaluating memory state and making policy decisions.
-    
-    Single Responsibility: Memory-based decision making.
     """
 
     def __init__(self, config: MemoryConfig):

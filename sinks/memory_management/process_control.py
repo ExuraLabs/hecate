@@ -1,10 +1,3 @@
-"""
-Process control operations based on memory decisions.
-
-This module contains the ProcessController class responsible for controlling
-process execution based on memory pressure decisions.
-"""
-
 import asyncio
 import logging
 from .memory import MemoryDecision
