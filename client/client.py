@@ -6,6 +6,7 @@ from ogmios.client import Client as OgmiosClient
 from ogmios.model.ogmios_model import Jsonrpc
 import orjson as json
 from websockets import ClientConnection, connect
+from websockets.connection import State
 
 from client.chainsync import AsyncFindIntersection, AsyncNextBlock
 from client.ledgerstate import AsyncEpoch, AsyncEraSummaries, AsyncTip
@@ -93,7 +94,7 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
 
     async def connect(self, **connection_params: Any) -> None:
         """Connect to the Ogmios server"""
-        if self.connection is not None and hasattr(self.connection, 'open') and self.connection.open:
+        if self.connection is not None and self.connection.state == State.OPEN:
             return  # Already connected, noop
             
         if self.connection is None:
@@ -108,7 +109,7 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
 
     async def send(self, request: str) -> None:
         """Send a request to the Ogmios server."""
-        if not self.connection or not self.connection.open:
+        if not self.connection or self.connection.state != State.OPEN:
             await self.connect()
             assert self.connection is not None
         
@@ -116,7 +117,7 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
 
     async def receive(self) -> dict[str, Any]:
         """Receive a response from the Ogmios server."""
-        if not self.connection or not self.connection.open:
+        if not self.connection or self.connection.state != State.OPEN:
             await self.connect()
             assert self.connection is not None
 

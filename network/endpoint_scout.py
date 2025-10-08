@@ -4,6 +4,7 @@ import time
 from typing import Protocol
 from dataclasses import dataclass
 from websockets import ClientConnection, connect, ConnectionClosed
+from websockets.connection import State
 from pydantic import WebsocketUrl
 
 logger = logging.getLogger(__name__)
@@ -174,7 +175,7 @@ class EndpointScout:
 
         # Check existing connection
         existing_conn = self.connections.get(url)
-        if existing_conn and hasattr(existing_conn, "open") and existing_conn.open:
+        if existing_conn and existing_conn.state == State.OPEN:
             return existing_conn
 
         # Create new connection
@@ -204,7 +205,7 @@ class EndpointScout:
         healthy_connections = [
             (url, conn)
             for url, conn in self.connections.items()
-            if conn and hasattr(conn, "open") and conn.open
+            if conn and conn.state == State.OPEN
         ]
 
         if healthy_connections:
@@ -332,7 +333,7 @@ class EndpointScout:
             # Only monitor connections that are actually open
             active_connections = [
                 (url, conn) for url, conn in self.connections.items()
-                if conn and hasattr(conn, "open") and conn.open
+                if conn and conn.state == State.OPEN
             ]
 
             for url, connection in active_connections:
