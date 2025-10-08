@@ -5,10 +5,11 @@ from ogmios import Block, Point
 from ogmios.client import Client as OgmiosClient
 from ogmios.model.ogmios_model import Jsonrpc
 import orjson as json
-from websockets import ClientConnection
+from websockets import ClientConnection, connect
 
 from client.chainsync import AsyncFindIntersection, AsyncNextBlock
 from client.ledgerstate import AsyncEpoch, AsyncEraSummaries, AsyncTip
+from config.settings import get_ogmios_settings
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
 from models import EpochNumber
 
@@ -32,11 +33,21 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
     # noinspection PyMissingConstructor
     def __init__(
         self,
-        connection: ClientConnection,
+        connection: ClientConnection | None = None,
+        host: str | None = None,
+        port: int = 1337,
+        path: str = "",
+        secure: bool = False,
         rpc_version: Jsonrpc = Jsonrpc.field_2_0,
     ) -> None:
         self.rpc_version = rpc_version
         self.connection = connection
+        
+        # Connection parameters for when connection is None
+        self.host = host
+        self.port = port
+        self.path = path
+        self.secure = secure
 
         # chainsync methods
         self.find_intersection = AsyncFindIntersection(self)
@@ -47,17 +58,67 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         self.chain_tip = AsyncTip(self)
         self.epoch = AsyncEpoch(self)
 
+    # Connection management
+    async def __aenter__(self) -> "HecateClient":
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Close client connection when finished"""
+        await self.close()
+
+    @staticmethod
+    def get_connection_url(
+        host: str | None = None,
+        port: int = 1337,
+        path: str = "",
+        secure: bool = False,
+    ) -> str:
+        """Build connection URL with the given parameters."""
+        ogmios_settings = get_ogmios_settings()
+        
+        # Use centralized settings if host not provided
+        if host is None and ogmios_settings.ogmios_host:
+            host = ogmios_settings.ogmios_host
+        else:
+            host = host or "localhost"
+
+        # Use centralized settings if port not provided 
+        if ogmios_settings.ogmios_port:
+            port = int(ogmios_settings.ogmios_port)
+
+        protocol: str = "wss" if secure else "ws"
+        connect_str = f"{protocol}://{host}:{port}/{path}"
+        return connect_str
+
+    async def connect(self, **connection_params: Any) -> None:
+        """Connect to the Ogmios server"""
+        if self.connection is not None and hasattr(self.connection, 'open') and self.connection.open:
+            return  # Already connected, noop
+            
+        if self.connection is None:
+            connect_str = self.get_connection_url(self.host, self.port, self.path, self.secure)
+            self.connection = await connect(connect_str, **connection_params)
+
+    async def close(self) -> None:
+        """Close the connection"""
+        if self.connection is not None:
+            await self.connection.close()
+            self.connection = None
+
     async def send(self, request: str) -> None:
         """Send a request to the Ogmios server."""
-        if not (self.connection or hasattr(self.connection, "open") or self.connection.open):
-            raise ConnectionError("No active connection available")
+        if not self.connection or not self.connection.open:
+            await self.connect()
+            assert self.connection is not None
         
         await self.connection.send(request)
 
     async def receive(self) -> dict[str, Any]:
         """Receive a response from the Ogmios server."""
-        if not (self.connection or hasattr(self.connection, "open") or self.connection.open):
-            raise ConnectionError("No active connection available")
+        if not self.connection or not self.connection.open:
+            await self.connect()
+            assert self.connection is not None
 
         raw_response = await self.connection.recv()
         resp: dict[str, Any] = json.loads(raw_response)
