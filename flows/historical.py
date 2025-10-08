@@ -1,25 +1,24 @@
-from asyncio.log import logger
 import time
+import asyncio
+from asyncio.log import logger
 from typing import Any
-from models import BlockHeight
 
-from ogmios import Block
 import ogmios.model.model_map as mm
+from ogmios import Block
 from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
 from prefect.futures import wait
 from prefect_dask import DaskTaskRunner  # type: ignore[attr-defined]
 
-
-from constants import FIRST_SHELLEY_EPOCH
 from client import HecateClient
-from network.endpoint_scout import EndpointScout
-from sinks.redis import HistoricalRedisSink
-
-from flows import get_system_checkpoint
-from flows.adaptive_memory_controller import AdaptiveMemoryController
-from models import EpochNumber
 from config.settings import get_batch_settings, get_dask_settings
+from constants import FIRST_SHELLEY_EPOCH
+from flows import get_system_checkpoint
+from models import BlockHeight, EpochNumber
+from monitoring.metrics_agent import collect_and_publish_metrics
+from network.endpoint_scout import EndpointScout
+from sinks.adaptive_memory_controller import AdaptiveMemoryController
+from sinks.redis import HistoricalRedisSink
 
 
 def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
@@ -56,8 +55,8 @@ def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
 )
 async def sync_epoch(
     epoch: EpochNumber,
-    batch_size: int = 1000,
     scout: EndpointScout,
+    batch_size: int = 1000,
 ) -> EpochNumber:
     """
     Synchronize a specific epoch by fetching blocks of data in batches and relaying them.
@@ -90,18 +89,14 @@ async def _process_epoch_blocks(
     sink: HistoricalRedisSink,
     epoch: EpochNumber,
     initial_batch_size: int,
-    logger,
+    run_logger: Any,
 ) -> int | None:
     """Process all blocks for an epoch, handling batching and memory management."""
-    original_block_init = Block.__init__
     Block.__init__ = fast_block_init
-    
-    try:
-        return await _stream_and_batch_blocks(
-            client, sink, epoch, initial_batch_size, logger
-        )
-    finally:
-        Block.__init__ = original_block_init
+
+    return await _stream_and_batch_blocks(
+        client, sink, epoch, initial_batch_size, run_logger
+    )
 
 
 async def _stream_and_batch_blocks(
@@ -109,7 +104,7 @@ async def _stream_and_batch_blocks(
     sink: HistoricalRedisSink,
     epoch: EpochNumber,
     initial_batch_size: int,
-    logger,
+    run_logger: Any,
 ) -> int | None:
     """Stream blocks and process them in adaptive batches."""
     resume_height = await sink.get_epoch_resume_height(epoch)
@@ -136,13 +131,15 @@ async def _stream_and_batch_blocks(
 
             # Send batch when it reaches the target size
             if len(batch) >= current_batch_size:
-                await _send_batch_and_log(sink, batch, epoch, logger)
+                await sink.send_batch(batch, epoch=epoch)
+                run_logger.debug(f"Sent batch of {len(batch)} blocks for epoch {epoch}")
                 blocks_processed += len(batch)
                 batch.clear()
 
     # Send any remaining blocks
     if batch:
-        await _send_batch_and_log(sink, batch, epoch, logger)
+        await sink.send_batch(batch, epoch=epoch)
+        run_logger.debug(f"Sent batch of {len(batch)} blocks for epoch {epoch}")
         blocks_processed += len(batch)
         if batch:
             last_height = batch[-1].height
@@ -153,17 +150,6 @@ async def _stream_and_batch_blocks(
 def _should_skip_block(block: Block, resume_height: BlockHeight | None) -> bool:
     """Check if a block should be skipped based on resume height."""
     return resume_height is not None and block.height <= resume_height
-
-
-async def _send_batch_and_log(
-    sink: HistoricalRedisSink,
-    batch: list[Block],
-    epoch: EpochNumber,
-    logger,
-) -> None:
-    """Send a batch to the sink and log the operation."""
-    await sink.send_batch(batch, epoch=epoch)
-    logger.debug(f"Sent batch of {len(batch)} blocks for epoch {epoch}")
 
 
 @flow(  # type: ignore[arg-type]
@@ -214,8 +200,6 @@ async def historical_sync_flow(
     scout = EndpointScout()
 
     # Start metrics collection in the background
-    from monitoring.metrics_agent import collect_and_publish_metrics
-    import asyncio
     logger.info("Starting metrics collection task before historical sync...")
     metrics_task = asyncio.create_task(collect_and_publish_metrics())
 
@@ -226,10 +210,10 @@ async def historical_sync_flow(
         logger.info(
             f"🔄 Resuming after last synced epoch {last} instead of {start_epoch}"
         )
-    start_epoch = EpochNumber(last + 1)
+        start_epoch = EpochNumber(last + 1)
 
     target = get_system_checkpoint()
-    epochs = list(range(start_epoch, target + 1))
+    epochs = [EpochNumber(e) for e in range(start_epoch, target + 1)]
     total_epochs = len(epochs)
 
     logger.info(
@@ -285,8 +269,8 @@ def process_batch(
 
     futures = sync_epoch.map(
         epoch=batch_epochs,
-        batch_size=final_batch_size,
-        scout=scout
+        scout=scout,
+        batch_size=final_batch_size
     )
     wait(futures)
 
