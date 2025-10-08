@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import psutil
 from pydantic import BaseModel
@@ -10,8 +11,10 @@ from config.settings import get_memory_settings
 from config.settings import get_batch_settings
 
 
-def _get_logger() -> logging.Logger:
-    """Get the appropriate logger for the current context."""
+def get_contextual_logger() -> logging.Logger:
+    """
+    Get the logger for the current context.
+    """
     try:
         from prefect import get_run_logger
         return get_run_logger()
@@ -82,7 +85,7 @@ class AdaptiveMemoryController:
             self.config.memory_limit_gb * self.config.emergency_threshold
         )
 
-        self.logger = _get_logger()
+        self.logger = get_contextual_logger()
         self.logger.info(
             "AdaptiveMemoryController initialized with limit: %.2f GB",
             self.config.memory_limit_gb
@@ -101,26 +104,40 @@ class AdaptiveMemoryController:
         )
 
     def _get_current_memory_usage(self) -> MemoryState:
-        """Gets the current memory usage of the process and its children."""
-        mem_info = self.process.memory_info()
-        total_used_bytes = mem_info.rss
+        """
+        Get the current memory usage of the process and its children. Returns a
+        MemoryState with current usage metrics
+        """
+        try:
+            mem_info = self.process.memory_info()
+            total_used_bytes = mem_info.rss
 
-        # Include memory from child processes
-        children = self.process.children(recursive=True)
-        for child in children:
-            try:
-                total_used_bytes += child.memory_info().rss
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
+            # Include memory from child processes
+            children = self.process.children(recursive=True)
+            for child in children:
+                try:
+                    total_used_bytes += child.memory_info().rss
+                except (psutil.ZombieProcess, psutil.NoSuchProcess, psutil.AccessDenied, OSError) as e:
+                    self.logger.debug("Error getting memory info for child process: %s", e)
+                    continue
 
-        used_gb = total_used_bytes / (1024**3)
+            used_gb = total_used_bytes / (1024**3)
 
-        return MemoryState(
-            total_gb=self.config.memory_limit_gb,
-            available_gb=self.config.memory_limit_gb - used_gb,
-            used_gb=used_gb,
-            used_percent=used_gb / self.config.memory_limit_gb,
-        )
+            return MemoryState(
+                total_gb=self.config.memory_limit_gb,
+                available_gb=self.config.memory_limit_gb - used_gb,
+                used_gb=used_gb,
+                used_percent=used_gb / self.config.memory_limit_gb,
+            )
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError, MemoryError) as e:
+            self.logger.error("Critical error getting memory usage: %s", e)
+            # Return safe default state to prevent further errors
+            return MemoryState(
+                total_gb=self.config.memory_limit_gb,
+                available_gb=0.0,
+                used_gb=self.config.memory_limit_gb,
+                used_percent=1.0,
+            )
 
     def get_memory_state(self, force_refresh: bool = False) -> MemoryState:
         """
@@ -311,7 +328,7 @@ class AdaptiveMemoryController:
 
         return optimal_batch_size
 
-    def get_snapshot_info(self) -> dict:
+    def get_snapshot_info(self) -> dict[str, Any]:
         """
         Get memory controller information for system snapshots and returns a 
         dictionary containing current memory state and configuration

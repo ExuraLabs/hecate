@@ -210,7 +210,7 @@ class EndpointScout:
 
         except Exception as e:
             logger.error("❌ Simple connection failed to %s: %s", url, e)
-            raise ConnectionError(f"Failed to establish simple connection to {url}: {e}")
+            raise ConnectionError(f"Failed to establish simple connection to {url}: {e}") from e
 
     async def _get_multi_endpoint_connection(self) -> ClientConnection:
         """Get best connection using existing multi-endpoint logic."""
@@ -384,13 +384,19 @@ class EndpointScout:
             self.metrics[url] = metrics
 
     async def close_all_connections(self) -> None:
-        """Close all open connections."""
-        await self.stop_monitoring()
+        """Close all open connections with proper error handling."""
+        try:
+            await self.stop_monitoring()
+        except (asyncio.CancelledError, ConnectionClosed, OSError) as e:
+            logger.warning("Error stopping monitoring during cleanup: %s", e)
 
-        for url, connection in self.connections.items():
+        for url, connection in list(self.connections.items()):
             if connection and hasattr(connection, "open") and connection.open:
-                await connection.close()
-                logger.debug("Closed connection to %s", url)
+                try:
+                    await connection.close()
+                    logger.debug("Closed connection to %s", url)
+                except (ConnectionClosed, OSError, RuntimeError) as e:
+                    logger.warning("Error closing connection to %s: %s", url, e)
 
         self.connections.clear()
         logger.info("All connections closed")

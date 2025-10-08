@@ -57,30 +57,39 @@ async def sync_epoch(
     batch_size: int = 1000,
 ) -> EpochNumber:
     """
-    Synchronize a specific epoch by fetching blocks of data in batches and relaying them.
+    Synchronize a specific epoch by fetching blocks of data in batches and 
+    relaying them. This function handles connection management, error recovery,
+    and proper cleanup for processing a single epoch.
     """
     logger = get_run_logger()
     epoch_start = time.perf_counter()
     logger.debug("▶️  Starting sync for epoch %s", epoch)
 
     scout = EndpointScout()
-    connection = await scout.get_best_connection()
-    
-    async with (HistoricalRedisSink() as sink, HecateClient(connection) as client):
-        last_height = await _process_epoch_blocks(
-            client, sink, epoch, batch_size, logger
-        )
+    try:
+        connection = await scout.get_best_connection()
         
-        if last_height is None:
-            logger.warning("No blocks processed for epoch %s, cannot mark complete.", epoch)
-            return epoch
-            
-        await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
-        logger.info("✅ Epoch %s completed", epoch)
+        async with (HistoricalRedisSink() as sink, HecateClient(connection) as client):
+            last_height = await _process_epoch_blocks(
+                client, sink, epoch, batch_size, logger
+            )
 
-    epoch_end = time.perf_counter()
-    logger.info("✅ Epoch %s sync complete in %.2fs", epoch, epoch_end - epoch_start)
-    return epoch
+            if last_height is None:
+                logger.warning("No blocks processed for epoch %s, cannot mark complete.", epoch)
+                return epoch
+                
+            await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
+            logger.info("✅ Epoch %s completed", epoch)
+
+        epoch_end = time.perf_counter()
+        logger.info("✅ Epoch %s sync complete in %.2fs", epoch, epoch_end - epoch_start)
+        return epoch
+
+    except Exception as e:
+        logger.error("Failed to sync epoch %s: %s", epoch, e)
+        raise
+    finally:
+        await scout.close_all_connections()
 
 
 async def _process_epoch_blocks(
@@ -109,53 +118,64 @@ async def _stream_and_batch_blocks(
     Stream blocks from client and process them in adaptive batches.
     
     This function handles the core logic of streaming blocks from the Ogmios client,
-    batching them for efficient processing, and sending them to Redis. It supports
+    batching them for efficient processing, and sending them to the sink. It supports
     resuming from a previous checkpoint if the epoch was partially processed.
     
     Args:
         client: The Hecate client for fetching blocks
-        sink: Redis sink for storing processed blocks  
+        sink: Sink for storing processed blocks  
         epoch: The epoch number to process
         initial_batch_size: Starting size for batches
         run_logger: Logger instance for this run
         
     Returns:
         The height of the last processed block, or None if no blocks were processed
-        
-    Note:
-        Batch size is currently fixed but could be made adaptive based on memory pressure.
     """
-    resume_height = await sink.get_epoch_resume_height(epoch)
-    
-    batch: list[Block] = []
-    blocks_processed = 0
-    last_height: int | None = None
-    current_batch_size = initial_batch_size
+    try:
+        resume_height = await sink.get_epoch_resume_height(epoch)
+        
+        batch: list[Block] = []
+        blocks_processed = 0
+        last_height: int | None = None
+        current_batch_size = initial_batch_size
 
-    async for blocks in client.epoch_blocks(epoch):
-        for block in blocks:
-            if _should_skip_block(block, resume_height):
-                continue
-                
-            batch.append(block)
-            last_height = block.height
+        async for blocks in client.epoch_blocks(epoch):
+            for block in blocks:
+                if _should_skip_block(block, resume_height):
+                    continue
+                    
+                batch.append(block)
+                last_height = block.height
 
-            # Send batch when it reaches the target size
-            if len(batch) >= current_batch_size:
+                # Send batch when it reaches the target size
+                if len(batch) >= current_batch_size:
+                    try:
+                        await sink.send_batch(batch, epoch=epoch)
+                        run_logger.debug("Sent batch of %d blocks for epoch %s", len(batch), epoch)
+                        blocks_processed += len(batch)
+                        batch.clear()
+                    except Exception as e:
+                        run_logger.error("Failed to send batch for epoch %s: %s", epoch, e)
+                        # Don't clear batch on failure, will retry
+                        raise
+
+        # Send any remaining blocks
+        if batch:
+            try:
                 await sink.send_batch(batch, epoch=epoch)
                 run_logger.debug("Sent batch of %d blocks for epoch %s", len(batch), epoch)
                 blocks_processed += len(batch)
-                batch.clear()
+                if batch:
+                    last_height = batch[-1].height
+            except Exception as e:
+                run_logger.error("Failed to send final batch for epoch %s: %s", epoch, e)
+                raise
 
-    # Send any remaining blocks
-    if batch:
-        await sink.send_batch(batch, epoch=epoch)
-        run_logger.debug("Sent batch of %d blocks for epoch %s", len(batch), epoch)
-        blocks_processed += len(batch)
-        if batch:
-            last_height = batch[-1].height
-
-    return last_height
+        return last_height
+        
+    except Exception as e:
+        run_logger.error("Error streaming blocks for epoch %s: %s", epoch, e)
+        raise
 
 
 def _should_skip_block(block: Block, resume_height: BlockHeight | None) -> bool:
@@ -200,51 +220,75 @@ async def historical_sync_flow(
     """
     logger = get_run_logger()
     flow_start = time.perf_counter()
+    metrics_task: asyncio.Task[None] | None = None
 
-    # Load settings from centralized config if not provided explicitly
-    batch_settings = get_batch_settings()
-    final_batch_size = batch_size or batch_settings.base_size
-    final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers
+    try:
+        # Load settings from centralized config if not provided explicitly
+        batch_settings = get_batch_settings()
+        final_batch_size = batch_size or batch_settings.base_size
+        final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers
 
+        # Initialize EndpointScout for connection management
+        # scout = EndpointScout()
 
-    # Initialize EndpointScout for connection management
-    # scout = EndpointScout()
+        # Start metrics collection in the background
+        logger.info("Starting metrics collection task before historical sync...")
+        metrics_task = asyncio.create_task(collect_and_publish_metrics())
 
-    # Start metrics collection in the background
-    logger.info("Starting metrics collection task before historical sync...")
-    metrics_task = asyncio.create_task(collect_and_publish_metrics())
+        async with HistoricalRedisSink(start_epoch=start_epoch) as sink:
+            last = await sink.get_last_synced_epoch()
 
-    async with HistoricalRedisSink(start_epoch=start_epoch) as sink:
-        last = await sink.get_last_synced_epoch()
+        if last > start_epoch:
+            logger.info(
+                "🔄 Resuming after last synced epoch %d instead of %d",
+                last, start_epoch
+            )
+            start_epoch = EpochNumber(last + 1)
 
-    if last > start_epoch:
+        target = get_system_checkpoint()
+        epochs = [EpochNumber(e) for e in range(start_epoch, target + 1)]
+        total_epochs = len(epochs)
+
         logger.info(
-            f"🔄 Resuming after last synced epoch {last} instead of {start_epoch}"
-        )
-        start_epoch = EpochNumber(last + 1)
-
-    target = get_system_checkpoint()
-    epochs = [EpochNumber(e) for e in range(start_epoch, target + 1)]
-    total_epochs = len(epochs)
-
-    logger.info(
-        f"Processing {total_epochs} epochs in batches of {final_concurrent_epochs}"
-    )
-
-    for batch_start_index in range(0, total_epochs, final_concurrent_epochs):
-        process_batch(
-            total_epochs,
-            final_concurrent_epochs,
-            batch_start_index,
-            epochs,
-            final_batch_size
+            "Processing %d epochs in batches of %d",
+            total_epochs, final_concurrent_epochs
         )
 
-    flow_end = time.perf_counter()
-    logger.info("🏁 Historical sync complete in %.2fs", flow_end - flow_start)
+        # Process epochs in batches
+        for batch_start_index in range(0, total_epochs, final_concurrent_epochs):
+            try:
+                process_batch(
+                    total_epochs,
+                    final_concurrent_epochs,
+                    batch_start_index,
+                    epochs,
+                    final_batch_size
+                )
+            except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
+                logger.error(
+                    "Failed to process batch starting at index %d: %s",
+                    batch_start_index, e
+                )
+                # Continue with next batch rather than failing completely
+                continue
 
-    if metrics_task:
-        metrics_task.cancel()
+        flow_end = time.perf_counter()
+        logger.info("🏁 Historical sync complete in %.2fs", flow_end - flow_start)
+
+    except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError, ValueError, TypeError) as e:
+        logger.error("Critical error in historical sync flow: %s", e)
+        raise
+    finally:
+        # Ensure metrics task is properly cleaned up
+        if metrics_task and not metrics_task.done():
+            logger.info("Shutting down metrics collection task...")
+            metrics_task.cancel()
+            try:
+                await metrics_task
+            except asyncio.CancelledError:
+                logger.debug("Metrics task cancelled successfully")
+            except (ConnectionError, TimeoutError, RuntimeError, OSError) as e:
+                logger.warning("Error during metrics task cleanup: %s", e)
 
     
 def process_batch(

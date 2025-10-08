@@ -8,7 +8,19 @@ from pydantic import BaseModel
 from config.settings import get_redis_settings
 
 
-logger = logging.getLogger(__name__)
+def get_contextual_logger() -> logging.Logger:
+    """
+    Get the logger for the current context.
+    """
+    try:
+        from prefect import get_run_logger
+        return get_run_logger()
+    except (ImportError, RuntimeError):
+        # Not in Prefect context or Prefect not available
+        return logging.getLogger(__name__)
+
+
+logger = get_contextual_logger()
 
 
 class RedisBackpressureConfig(BaseModel):
@@ -35,6 +47,11 @@ class RedisBackpressureMonitor:
     ):
         """
         Initialize the backpressure monitor.
+        
+        Args:
+            redis_client: Connected Redis client instance
+            stream_key: The Redis stream key to monitor
+            config: Configuration for backpressure thresholds, uses defaults if None
         """
         self.redis = redis_client
         self.stream_key = stream_key
@@ -64,9 +81,8 @@ class RedisBackpressureMonitor:
                 if stream_length >= self.config.max_depth:
                     if not self._is_paused:
                         logger.warning(
-                            f"Redis stream '{self.stream_key}' depth ({stream_length}) "
-                            f"exceeds max_depth ({self.config.max_depth}). "
-                            "Pausing processing."
+                            "Redis stream '%s' depth (%d) exceeds max_depth (%d). Pausing processing.",
+                            self.stream_key, stream_length, self.config.max_depth
                         )
                         self._is_paused = True
                 elif self._is_paused:
@@ -79,11 +95,23 @@ class RedisBackpressureMonitor:
                 logger.error("Error checking Redis stream depth: %s", e)
                 # In case of Redis error, we pause to be safe
                 self._is_paused = True
-            except Exception as e:
+            except asyncio.CancelledError:
+                logger.debug("Backpressure monitoring cancelled")
+                break
+            except (OSError, ConnectionError) as e:
+                logger.error("Connection error in backpressure monitor: %s", e)
+                self._is_paused = True
+            except Exception as e:  # noqa: BLE001
+                # Last resort catch-all to prevent monitor from crashing completely.
+                # This is critical infrastructure that must remain resilient.
                 logger.exception("Unexpected error in backpressure monitor: %s", e)
                 self._is_paused = True
 
-            await asyncio.sleep(self.config.check_interval)
+            try:
+                await asyncio.sleep(self.config.check_interval)
+            except asyncio.CancelledError:
+                logger.debug("Backpressure monitoring sleep cancelled")
+                break
 
     def start(self) -> None:
         """Starts the background monitoring task."""
