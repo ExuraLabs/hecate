@@ -61,7 +61,7 @@ async def sync_epoch(
     """
     logger = get_run_logger()
     epoch_start = time.perf_counter()
-    logger.debug(f"▶️  Starting sync for epoch {epoch}")
+    logger.debug("▶️  Starting sync for epoch %s", epoch)
 
     scout = EndpointScout()
     connection = await scout.get_best_connection()
@@ -72,14 +72,14 @@ async def sync_epoch(
         )
         
         if last_height is None:
-            logger.warning(f"No blocks processed for epoch {epoch}, cannot mark complete.")
+            logger.warning("No blocks processed for epoch %s, cannot mark complete.", epoch)
             return epoch
             
         await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
-        logger.info(f"✅ Epoch {epoch} completed")
+        logger.info("✅ Epoch %s completed", epoch)
 
     epoch_end = time.perf_counter()
-    logger.info(f"✅ Epoch {epoch} sync complete in {epoch_end - epoch_start:.2f}s")
+    logger.info("✅ Epoch %s sync complete in %.2fs", epoch, epoch_end - epoch_start)
     return epoch
 
 
@@ -105,7 +105,26 @@ async def _stream_and_batch_blocks(
     initial_batch_size: int,
     run_logger: Any,
 ) -> int | None:
-    """Stream blocks and process them in adaptive batches."""
+    """
+    Stream blocks from client and process them in adaptive batches.
+    
+    This function handles the core logic of streaming blocks from the Ogmios client,
+    batching them for efficient processing, and sending them to Redis. It supports
+    resuming from a previous checkpoint if the epoch was partially processed.
+    
+    Args:
+        client: The Hecate client for fetching blocks
+        sink: Redis sink for storing processed blocks  
+        epoch: The epoch number to process
+        initial_batch_size: Starting size for batches
+        run_logger: Logger instance for this run
+        
+    Returns:
+        The height of the last processed block, or None if no blocks were processed
+        
+    Note:
+        Batch size is currently fixed but could be made adaptive based on memory pressure.
+    """
     resume_height = await sink.get_epoch_resume_height(epoch)
     
     batch: list[Block] = []
@@ -124,14 +143,14 @@ async def _stream_and_batch_blocks(
             # Send batch when it reaches the target size
             if len(batch) >= current_batch_size:
                 await sink.send_batch(batch, epoch=epoch)
-                run_logger.debug(f"Sent batch of {len(batch)} blocks for epoch {epoch}")
+                run_logger.debug("Sent batch of %d blocks for epoch %s", len(batch), epoch)
                 blocks_processed += len(batch)
                 batch.clear()
 
     # Send any remaining blocks
     if batch:
         await sink.send_batch(batch, epoch=epoch)
-        run_logger.debug(f"Sent batch of {len(batch)} blocks for epoch {epoch}")
+        run_logger.debug("Sent batch of %d blocks for epoch %s", len(batch), epoch)
         blocks_processed += len(batch)
         if batch:
             last_height = batch[-1].height
@@ -212,26 +231,17 @@ async def historical_sync_flow(
         f"Processing {total_epochs} epochs in batches of {final_concurrent_epochs}"
     )
 
-    try:
-        # Start monitoring connections
-        # await scout.start_monitoring()
-        for i in range(0, total_epochs, final_concurrent_epochs):
-            process_batch(
-                total_epochs,
-                final_concurrent_epochs,
-                i,
-                epochs,
-                final_batch_size,
-                # scout
-            )
-
-    finally:
-        # Cleanup connections
-        # await scout.close_all_connections()
-        pass
+    for batch_start_index in range(0, total_epochs, final_concurrent_epochs):
+        process_batch(
+            total_epochs,
+            final_concurrent_epochs,
+            batch_start_index,
+            epochs,
+            final_batch_size
+        )
 
     flow_end = time.perf_counter()
-    logger.info(f"🏁 Historical sync complete in {flow_end - flow_start:.2f}s")
+    logger.info("🏁 Historical sync complete in %.2fs", flow_end - flow_start)
 
     if metrics_task:
         metrics_task.cancel()
@@ -239,35 +249,50 @@ async def historical_sync_flow(
     
 def process_batch(
     total_epochs: int,
-    final_concurrent_epochs: int,
-    i: int,
+    max_concurrent_epochs: int,
+    batch_start_index: int,
     epochs: list[EpochNumber],
-    final_batch_size: int,
+    batch_size: int,
     # scout: EndpointScout
 ) -> None:
     """
     Process a batch of epochs concurrently using sync_epoch tasks.
+    
+    This function takes a slice of epochs and processes them concurrently
+    using Prefect's task mapping functionality. It provides progress
+    logging and timing information for each batch.
+    
+    Args:
+        total_epochs: Total number of epochs to process across all batches
+        max_concurrent_epochs: Maximum number of epochs to process simultaneously
+        batch_start_index: Starting index in the epochs list for this batch
+        epochs: Complete list of epochs to process
+        batch_size: Number of blocks to process per epoch batch
+        
+    Note:
+        The scout parameter is commented out but would be used for connection management
     """
-    batch_start = time.perf_counter()
-    batch_epochs = epochs[i : i + final_concurrent_epochs]
-    batch_num = (i // final_concurrent_epochs) + 1
+    batch_start_time = time.perf_counter()
+    batch_epochs = epochs[batch_start_index : batch_start_index + max_concurrent_epochs]
+    batch_number = (batch_start_index // max_concurrent_epochs) + 1
     total_batches = (
-        total_epochs + final_concurrent_epochs - 1
-    ) // final_concurrent_epochs
+        total_epochs + max_concurrent_epochs - 1
+    ) // max_concurrent_epochs
 
     logger.info(
-        f"🔄 Starting batch {batch_num}/{total_batches}: "
-        f"epochs {batch_epochs[0]} to {batch_epochs[-1]}"
+        "🔄 Starting batch %d/%d: epochs %d to %d",
+        batch_number, total_batches, batch_epochs[0], batch_epochs[-1]
     )
 
     futures = sync_epoch.map(
         epoch=batch_epochs,
         # scout=scout,
-        batch_size=final_batch_size
+        batch_size=batch_size
     )
     wait(futures)
 
-    batch_end = time.perf_counter()
+    batch_end_time = time.perf_counter()
     logger.info(
-        f"✅ Completed batch {batch_num}/{total_batches} in {batch_end - batch_start:.2f}s"
+        "✅ Completed batch %d/%d in %.2fs",
+        batch_number, total_batches, batch_end_time - batch_start_time
     )

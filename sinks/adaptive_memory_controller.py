@@ -84,20 +84,20 @@ class AdaptiveMemoryController:
 
         self.logger = _get_logger()
         self.logger.info(
-            "AdaptiveMemoryController initialized with limit: "
-            f"{self.config.memory_limit_gb:.2f} GB"
+            "AdaptiveMemoryController initialized with limit: %.2f GB",
+            self.config.memory_limit_gb
         )
         self.logger.debug(
-            f"  - Warning threshold:  {self.warning_limit_gb:.2f} GB "
-            f"({self.config.warning_threshold:.0%})"
+            "  - Warning threshold:  %.2f GB (%.0f%%)",
+            self.warning_limit_gb, self.config.warning_threshold * 100
         )
         self.logger.debug(
-            f"  - Critical threshold: {self.critical_limit_gb:.2f} GB "
-            f"({self.config.critical_threshold:.0%})"
+            "  - Critical threshold: %.2f GB (%.0f%%)",
+            self.critical_limit_gb, self.config.critical_threshold * 100
         )
         self.logger.debug(
-            f"  - Emergency threshold: {self.emergency_limit_gb:.2f} GB "
-            f"({self.config.emergency_threshold:.0%})"
+            "  - Emergency threshold: %.2f GB (%.0f%%)",
+            self.emergency_limit_gb, self.config.emergency_threshold * 100
         )
 
     def _get_current_memory_usage(self) -> MemoryState:
@@ -124,16 +124,28 @@ class AdaptiveMemoryController:
 
     def get_memory_state(self, force_refresh: bool = False) -> MemoryState:
         """
-        Returns the current memory state, using a cached value if checked recently.
+        Get the current memory state, using cached value if recently checked.
+        
+        This method implements caching to avoid excessive memory polling.
+        The cache is refreshed when the check interval has elapsed or
+        when explicitly requested.
+        
+        Args:
+            force_refresh: If True, bypass cache and get fresh memory state
+            
+        Returns:
+            Current memory state including usage and availability
         """
-        now = time.time()
+        current_time = time.time()
+        time_since_last_check = current_time - self._last_check_time
+        
         if (
             force_refresh
             or not self._current_state
-            or (now - self._last_check_time) > self.config.check_interval_seconds
+            or time_since_last_check > self.config.check_interval_seconds
         ):
             self._current_state = self._get_current_memory_usage()
-            self._last_check_time = now
+            self._last_check_time = current_time
 
         return self._current_state
 
@@ -179,24 +191,23 @@ class AdaptiveMemoryController:
             optimal_batch_size = max(self.min_batch_size, current_batch_size // 2)
             if optimal_batch_size != current_batch_size:
                 self.logger.info(
-                    "High memory pressure detected, reducing batch size from "
-                    f"{current_batch_size} to {optimal_batch_size}"
+                    "High memory pressure detected, reducing batch size from %d to %d",
+                    current_batch_size, optimal_batch_size
                 )
         elif current_batch_size < original_batch_size:
             optimal_batch_size = min(self.max_batch_size, current_batch_size + 100)
             if optimal_batch_size != current_batch_size:
                 self.logger.debug(
-                    "Memory pressure normal, increasing batch size from "
-                    f"{current_batch_size} to {optimal_batch_size}"
+                    "Memory pressure normal, increasing batch size from %d to %d",
+                    current_batch_size, optimal_batch_size
                 )
         else:
             optimal_batch_size = current_batch_size
 
         if should_pause:
             self.logger.warning(
-                f"Memory emergency threshold reached during epoch {epoch} "
-                f"({state.used_gb:.2f}GB/{state.total_gb:.2f}GB = {state.used_percent:.1%}), "
-                f"pausing processing for memory recovery"
+                "Memory emergency threshold reached during epoch %s (%.2fGB/%.2fGB = %.1f%%), pausing processing for memory recovery",
+                epoch, state.used_gb, state.total_gb, state.used_percent
             )
 
         memory_response = MemoryResponse(
@@ -233,8 +244,8 @@ class AdaptiveMemoryController:
         await self.pause_processing_if_needed(epoch)
 
         self.logger.debug(
-            f"Memory check performed: {memory_response.memory_status}, batch size: "
-            f"{memory_response.optimal_batch_size}"
+            "Memory check performed: %s, batch size: %d",
+            memory_response.memory_status, memory_response.optimal_batch_size
         )
 
         return memory_response.optimal_batch_size
@@ -255,9 +266,8 @@ class AdaptiveMemoryController:
         state = self._last_memory_response.state
 
         self.logger.warning(
-            f"Memory emergency threshold reached during epoch {epoch or '-'} "
-            f"({state.used_gb:.2f}GB/{state.total_gb:.2f}GB = {state.used_percent:.1%}), "
-            f"pausing processing for memory recovery"
+            "Memory emergency threshold reached during epoch %s (%.2fGB/%.2fGB = %.1f%%), pausing processing for memory recovery",
+            epoch or '-', state.used_gb, state.total_gb, state.used_percent
         )
 
         await asyncio.sleep(self.pause_interval_seconds)
@@ -302,7 +312,10 @@ class AdaptiveMemoryController:
         return optimal_batch_size
 
     def get_snapshot_info(self) -> dict:
-        """Get memory controller information for system snapshots."""
+        """
+        Get memory controller information for system snapshots and returns a 
+        dictionary containing current memory state and configuration
+        """
         if self._last_memory_response is None:
             return {
                 "memory_limit_gb": self.config.memory_limit_gb,
@@ -320,7 +333,9 @@ class AdaptiveMemoryController:
         }
 
     def format_memory_info(self, base_memory_info: str) -> str:
-        """Format memory information for display, including controller status."""
+        """
+        Format memory information for display, including controller status.
+        """
         try:
             snapshot_info = self.get_snapshot_info()
             memory_info = base_memory_info

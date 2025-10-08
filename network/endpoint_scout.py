@@ -27,27 +27,40 @@ class SelectionPolicy(Protocol):
         self, candidates: list[tuple[WebsocketUrl, ConnectionMetrics]]
     ) -> WebsocketUrl:
         """Select the best endpoint from a list of candidates."""
-        ...
+        raise NotImplementedError("Subclasses must implement select_endpoint")
 
 
 class LatencyBasedPolicy:
-    """Selects the endpoint with the lowest latency."""
+    """
+    Endpoint selection policy that chooses the endpoint with lowest latency.
+    
+    This policy prioritizes connection speed by selecting the endpoint that
+    responds fastest to ping requests. If no latency metrics are available,
+    it falls back to the first endpoint in the candidate list.
+    """
 
     def select_endpoint(
         self, candidates: list[tuple[WebsocketUrl, ConnectionMetrics]]
     ) -> WebsocketUrl:
-        """Select the endpoint with the lowest latency from valid candidates."""
-        valid_candidates = [
+        """
+        Select the endpoint with the lowest latency from valid candidates.
+        """
+        endpoints_and_info = [
             (url, metrics)
             for url, metrics in candidates
             if metrics.latency_ms is not None
         ]
 
-        if not valid_candidates:
-            # Fallback to first if no valid metrics
+        if not endpoints_and_info:
+            # Fallback to first endpoint if no latency metrics available
             return candidates[0][0]
 
-        return min(valid_candidates, key=lambda x: x[1].latency_ms or float("inf"))[0]
+        # Select endpoint with minimum latency
+        best_endpoint = min(
+            endpoints_and_info,
+            key=lambda endpoint: endpoint[1].latency_ms or float("inf")
+        )
+        return best_endpoint[0]
 
 
 class WeightedLatencyPolicy:
@@ -130,12 +143,12 @@ class EndpointScout:
         # Simple mode: if both ogmios_host and ogmios_port are provided (EXCLUSIVE mode)
         if settings.ogmios_host and settings.ogmios_port:
             url = f"ws://{settings.ogmios_host}:{settings.ogmios_port}"
-            logger.info(f"🔗 Simple connection mode: {url}")
+            logger.info("🔗 Simple connection mode: %s", url)
             return True, [WebsocketUrl(url)]
 
         # Multi-endpoint mode: always load from settings
         configured_endpoints = [WebsocketUrl(ep["url"]) for ep in settings.endpoints]
-        logger.info(f"🔍 Multi-endpoint mode: {len(configured_endpoints)} endpoints from settings")
+        logger.info("🔍 Multi-endpoint mode: %d endpoints from settings", len(configured_endpoints))
         return False, configured_endpoints
 
     @staticmethod
@@ -180,7 +193,7 @@ class EndpointScout:
 
         # Create new connection
         try:
-            logger.debug(f"Establishing simple connection to {url}")
+            logger.debug("Establishing simple connection to %s", url)
             start_time = time.perf_counter()
             conn = await connect(str(url))
             end_time = time.perf_counter()
@@ -192,11 +205,11 @@ class EndpointScout:
                 last_ping=time.time()
             )
 
-            logger.info(f"✅ Simple connection established: {url} ({latency:.2f}ms)")
+            logger.info("✅ Simple connection established: %s (%.2fms)", url, latency)
             return conn
 
         except Exception as e:
-            logger.error(f"❌ Simple connection failed to {url}: {e}")
+            logger.error("❌ Simple connection failed to %s: %s", url, e)
             raise ConnectionError(f"Failed to establish simple connection to {url}: {e}")
 
     async def _get_multi_endpoint_connection(self) -> ClientConnection:
@@ -359,10 +372,10 @@ class EndpointScout:
             metrics.last_ping = time.time()
             self.metrics[url] = metrics
 
-            logger.debug(f"Ping {url}: {latency_ms:.2f}ms")
+            logger.debug("Ping %s: %.2fms", url, latency_ms)
 
         except (asyncio.TimeoutError, ConnectionClosed) as e:
-            logger.warning(f"Ping failed for {url}: {e}")
+            logger.warning("Ping failed for %s: %s", url, e)
             await connection.close()
             self.connections[url] = None
             metrics = self.metrics.get(url, ConnectionMetrics())

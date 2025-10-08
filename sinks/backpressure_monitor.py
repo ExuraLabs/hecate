@@ -21,6 +21,10 @@ class RedisBackpressureConfig(BaseModel):
 class RedisBackpressureMonitor:
     """
     Monitors Redis streams to apply backpressure and prevent OOM issues.
+    
+    This monitor periodically checks the depth of a Redis stream and pauses
+    processing when the stream becomes too full, helping prevent out-of-memory
+    conditions by implementing backpressure control.
     """
 
     def __init__(
@@ -29,6 +33,9 @@ class RedisBackpressureMonitor:
         stream_key: str,
         config: Optional[RedisBackpressureConfig] = None,
     ):
+        """
+        Initialize the backpressure monitor.
+        """
         self.redis = redis_client
         self.stream_key = stream_key
 
@@ -41,10 +48,16 @@ class RedisBackpressureMonitor:
 
         self.config = config
         self._is_paused = False
-        self._monitoring_task: Optional[asyncio.Task] = None
+        self._monitoring_task: Optional[asyncio.Task[None]] = None
 
     async def _check_stream_depth(self) -> None:
-        """Periodically checks the Redis stream depth and updates the pause state."""
+        """
+        Periodically check Redis stream depth and update pause state.
+        
+        This method runs in a continuous loop, checking the stream depth
+        at regular intervals and updating the pause state when the depth
+        exceeds or falls below the configured threshold.
+        """
         while True:
             try:
                 stream_length = await self.redis.xlen(self.stream_key)
@@ -58,16 +71,16 @@ class RedisBackpressureMonitor:
                         self._is_paused = True
                 elif self._is_paused:
                     logger.info(
-                        f"Redis stream '{self.stream_key}' depth ({stream_length}) "
-                        "is back to normal. Resuming processing."
+                        "Redis stream '%s' depth (%d) is back to normal. Resuming processing.",
+                        self.stream_key, stream_length
                     )
                     self._is_paused = False
             except redis.RedisError as e:
-                logger.error(f"Error checking Redis stream depth: {e}")
+                logger.error("Error checking Redis stream depth: %s", e)
                 # In case of Redis error, we pause to be safe
                 self._is_paused = True
             except Exception as e:
-                logger.exception(f"Unexpected error in backpressure monitor: {e}")
+                logger.exception("Unexpected error in backpressure monitor: %s", e)
                 self._is_paused = True
 
             await asyncio.sleep(self.config.check_interval)
@@ -76,7 +89,8 @@ class RedisBackpressureMonitor:
         """Starts the background monitoring task."""
         if self._monitoring_task is None or self._monitoring_task.done():
             logger.info(
-                f"Starting Redis backpressure monitor for stream '{self.stream_key}'."
+                "Starting Redis backpressure monitor for stream '%s'.",
+                self.stream_key
             )
             self._monitoring_task = asyncio.create_task(self._check_stream_depth())
         else:

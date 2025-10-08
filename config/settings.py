@@ -102,31 +102,39 @@ class OgmiosSettings(BaseSettings):
 
 @lru_cache
 def get_dask_settings() -> DaskSettings:
+    """Get cached Dask configuration settings."""
     return DaskSettings()
 
 
 @lru_cache
 def get_memory_settings() -> MemorySettings:
+    """Get cached memory management settings."""
     return MemorySettings()
 
 
 @lru_cache
 def get_redis_settings() -> RedisSettings:
+    """Get cached Redis connection and stream settings."""
     return RedisSettings()
 
 
 @lru_cache
 def get_batch_settings() -> BatchSettings:
+    """Get cached batch processing size settings."""
     return BatchSettings()
 
 
 @lru_cache
 def get_monitoring_settings() -> MonitoringSettings:
+    """Get cached monitoring and metrics collection settings."""
     return MonitoringSettings()
 
 
 @lru_cache
 def get_ogmios_settings() -> OgmiosSettings:
+    """
+    Get cached Ogmios endpoint configuration settings.
+    """
     # Set the environment variable for other parts of the app that might use it directly
     # os.environ["OGMIOS_ENDPOINTS"] = OgmiosSettings().endpoints
     return OgmiosSettings()

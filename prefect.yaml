@@ -64,32 +64,9 @@ deployments:
           MIN_BATCH_SIZE: "{{ prefect.variables.min_batch_size }}"
           MAX_BATCH_SIZE: "{{ prefect.variables.max_batch_size }}"
           COLLECTION_INTERVAL: "{{ prefect.variables.collection_interval }}"
+          OGMIOS_HOST: "{{ prefect.variables.ogmios_host }}"
+          OGMIOS_PORT: "{{ prefect.variables.ogmios_port }}"
     version:
     tags: [ ]
     concurrency_limit:
     parameters: { }
-
-  - name: metrics-agent
-    description: Flow that collects and publishes system metrics for Hecate
-    entrypoint: monitoring/metrics_agent.py:metrics_collection_flow
-    work_pool:
-      name: exura-work-pool
-      work_queue_name: monitoring
-      job_variables:
-        env:
-          REDIS_URL: "{{ prefect.variables.redis_url }}"
-          COLLECTION_INTERVAL: "{{ prefect.variables.collection_interval }}"
-          REDIS_MAX_STREAM_DEPTH: "{{ prefect.variables.redis_max_stream_depth }}"
-          REDIS_WARNING_THRESHOLD: "{{ prefect.variables.redis_warning_threshold }}"
-          REDIS_CHECK_INTERVAL: "{{ prefect.variables.redis_check_interval }}"
-    version:
-    tags: [ monitoring, metrics ]
-    concurrency_limit:
-    parameters: { }
-    schedule:
-      # Elimina el cron para ejecución única y continua
-      # El flujo metrics-agent se lanza una vez y permanece activo
-      # Si Prefect requiere schedule, usa null o comenta
-      # - cron: "*/5 * * * *"
-      #   timezone: UTC
-      #   active: true
