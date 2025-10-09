@@ -6,6 +6,7 @@ from typing import Any, Callable
 import ogmios.model.model_map as mm
 from ogmios import Block
 from prefect import flow, get_run_logger, task
+from prefect import map as prefect_map
 from prefect.cache_policies import NO_CACHE
 from prefect.futures import wait
 from prefect_dask import DaskTaskRunner  # type: ignore[attr-defined]
@@ -15,7 +16,7 @@ from config.settings import get_batch_settings, get_dask_settings
 from constants import FIRST_SHELLEY_EPOCH
 from flows import get_system_checkpoint
 from models import BlockHeight, EpochNumber
-from monitoring.metrics_agent import collect_and_publish_metrics
+from monitoring.metrics_agent import collect_and_publish_metrics, MetricsAgent
 from network.endpoint_scout import EndpointScout
 from sinks.redis import HistoricalRedisSink
 
@@ -213,16 +214,16 @@ async def historical_sync_flow(
     logger = get_run_logger()
     flow_start = time.perf_counter()
 
+    metrics_agent: MetricsAgent = MetricsAgent()
     try:
         # Load settings from centralized config if not provided explicitly
         batch_settings = get_batch_settings()
         final_batch_size = batch_size or batch_settings.base_size
         final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers
 
-        # Initial metrics collection before starting sync
-        logger.info("Collecting initial metrics before historical sync...")
+        # Singleton MetricsAgent for metrics collection
         try:
-            await collect_and_publish_metrics()
+            await collect_and_publish_metrics(agent=metrics_agent)
         except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
             logger.warning("Failed to collect initial metrics: %s", e)
 
@@ -253,7 +254,8 @@ async def historical_sync_flow(
                     final_concurrent_epochs,
                     batch_start_index,
                     epochs,
-                    final_batch_size
+                    final_batch_size,
+                    metrics_agent
                 )
             except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
                 logger.error(
@@ -273,7 +275,7 @@ async def historical_sync_flow(
         # Collect final metrics before closing
         logger.info("Collecting final metrics after historical sync...")
         try:
-            await collect_and_publish_metrics()
+            await collect_and_publish_metrics(agent=metrics_agent)
         except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
             logger.warning("Failed to collect final metrics: %s", e)
 
@@ -284,6 +286,7 @@ async def process_batch(
     batch_start_index: int,
     epochs: list[EpochNumber],
     batch_size: int,
+    metrics_agent: MetricsAgent,
 ) -> None:
     """
     Process a batch of epochs concurrently using sync_epoch tasks.
@@ -316,15 +319,12 @@ async def process_batch(
 
     # Collect metrics at the start of each batch
     try:
-        await collect_and_publish_metrics()
+        await collect_and_publish_metrics(agent=metrics_agent)
         logger.debug("Metrics collection completed for batch %d", batch_number)
     except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
         logger.warning("Failed to collect metrics for batch %d: %s", batch_number, e)
 
-    futures = sync_epoch.map(
-        epoch=batch_epochs,
-        batch_size=batch_size
-    )
+    futures = prefect_map(sync_epoch, epoch=batch_epochs, batch_size=[batch_size]*len(batch_epochs))
     wait(futures)
 
     batch_end_time = time.perf_counter()

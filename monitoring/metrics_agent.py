@@ -1,7 +1,9 @@
 import logging
 import time
 from dataclasses import dataclass
+from typing import Optional
 
+from prefect import get_run_logger
 import psutil
 import redis.asyncio as redis
 
@@ -27,11 +29,22 @@ class MetricsAgent:
     Runs independently from sync workers, providing observability without impacting performance.
     """
 
+
+    _instance = None
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
     def __init__(self):
+        if hasattr(self, '_initialized') and self._initialized:
+            return
         self.redis_client: redis.Redis | None = None
         self._last_data_stream_len: int | None = None
         self._last_check_time: float | None = None
         self.logger = logging.getLogger(__name__)
+        self._initialized = True
 
     async def collect_system_metrics(self) -> SystemMetrics:
         """Collects metrics from the entire system, including blocks per second."""
@@ -123,12 +136,12 @@ class MetricsAgent:
         return delta_blocks / delta_time if delta_time > 0 else 0.0
 
 
-async def collect_and_publish_metrics() -> None:
+async def collect_and_publish_metrics(agent: Optional['MetricsAgent'] = None) -> None:
     """Collect and publish system metrics once (called periodically by the flow)."""
-    from prefect import get_run_logger
     logger = get_run_logger()
 
-    agent = MetricsAgent()
+    if agent is None:
+        agent: MetricsAgent = MetricsAgent()
     try:
         async with redis.from_url(get_redis_settings().url) as redis_client:
             agent.redis_client = redis_client
