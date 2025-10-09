@@ -212,7 +212,6 @@ async def historical_sync_flow(
     """
     logger = get_run_logger()
     flow_start = time.perf_counter()
-    metrics_task: asyncio.Task[None] | None = None
 
     try:
         # Load settings from centralized config if not provided explicitly
@@ -220,12 +219,12 @@ async def historical_sync_flow(
         final_batch_size = batch_size or batch_settings.base_size
         final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers
 
-        # Initialize EndpointScout for connection management
-        # scout = EndpointScout()
-
-        # Start metrics collection in the background
-        logger.info("Starting metrics collection task before historical sync...")
-        metrics_task = asyncio.create_task(collect_and_publish_metrics())
+        # Initial metrics collection before starting sync
+        logger.info("Collecting initial metrics before historical sync...")
+        try:
+            await collect_and_publish_metrics()
+        except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
+            logger.warning("Failed to collect initial metrics: %s", e)
 
         async with HistoricalRedisSink(start_epoch=start_epoch) as sink:
             last = await sink.get_last_synced_epoch()
@@ -249,7 +248,7 @@ async def historical_sync_flow(
         # Process epochs in batches
         for batch_start_index in range(0, total_epochs, final_concurrent_epochs):
             try:
-                process_batch(
+                await process_batch(
                     total_epochs,
                     final_concurrent_epochs,
                     batch_start_index,
@@ -271,25 +270,20 @@ async def historical_sync_flow(
         logger.error("Critical error in historical sync flow: %s", e)
         raise
     finally:
-        # Ensure metrics task is properly cleaned up
-        if metrics_task and not metrics_task.done():
-            logger.info("Shutting down metrics collection task...")
-            metrics_task.cancel()
-            try:
-                await metrics_task
-            except asyncio.CancelledError:
-                logger.debug("Metrics task cancelled successfully")
-            except (ConnectionError, TimeoutError, RuntimeError, OSError) as e:
-                logger.warning("Error during metrics task cleanup: %s", e)
+        # Collect final metrics before closing
+        logger.info("Collecting final metrics after historical sync...")
+        try:
+            await collect_and_publish_metrics()
+        except Exception as e:
+            logger.warning("Failed to collect final metrics: %s", e)
 
     
-def process_batch(
+async def process_batch(
     total_epochs: int,
     max_concurrent_epochs: int,
     batch_start_index: int,
     epochs: list[EpochNumber],
     batch_size: int,
-    # scout: EndpointScout
 ) -> None:
     """
     Process a batch of epochs concurrently using sync_epoch tasks.
@@ -320,9 +314,15 @@ def process_batch(
         batch_number, total_batches, batch_epochs[0], batch_epochs[-1]
     )
 
+    # Collect metrics at the start of each batch
+    try:
+        await collect_and_publish_metrics()
+        logger.debug("Metrics collection completed for batch %d", batch_number)
+    except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
+        logger.warning("Failed to collect metrics for batch %d: %s", batch_number, e)
+
     futures = sync_epoch.map(
         epoch=batch_epochs,
-        # scout=scout,
         batch_size=batch_size
     )
     wait(futures)

@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -126,7 +125,7 @@ class MetricsAgent:
 
 
 async def collect_and_publish_metrics() -> None:
-    """Background task that collects and publishes system metrics periodically."""
+    """Collect and publish system metrics once (called periodically by the flow)."""
     from prefect import get_run_logger
     logger = get_run_logger()
 
@@ -135,35 +134,27 @@ async def collect_and_publish_metrics() -> None:
     try:
         async with redis.from_url(get_redis_settings().url) as redis_client:
             agent.redis_client = redis_client
-            while True:
-                try:
-                    metrics = await agent.collect_system_metrics()
-                    active_epochs_str = f"[{', '.join(map(str, metrics.active_epochs))}]" if metrics.active_epochs else "[]"
-                    logger.info(
-                        "System Metrics | Memory: %.2fGB (%.1f%%) | System Load: %.2f | "
-                        "Streams: %s | Active Epochs: %s | Blocks/sec: %.2f",
-                        metrics.memory_used_gb,
-                        metrics.memory_used_percent,
-                        metrics.system_load,
-                        metrics.redis_stream_depths,
-                        active_epochs_str,
-                        metrics.blocks_per_second
-                    )
-                    await _publish_metrics_to_redis(redis_client, metrics)
-                except asyncio.CancelledError:
-                    logger.info("Metrics collection task cancelled during publish to Redis.")
-                    break
-                except (ConnectionError, TimeoutError) as e:
-                    logger.error("Redis connection failed: %s", e)
-                except (OSError, MemoryError) as e:
-                    logger.error("System resource error: %s", e)
-                except (ValueError, TypeError) as e:
-                    logger.error("Data processing error: %s", e)
-                except Exception as e:  # noqa: BLE001
-                    logger.error("Unexpected error in metrics collection: %s", e)
-                await asyncio.sleep(interval)
-    except asyncio.CancelledError:
-        logger.info("Metrics collection task cancelled cleanly.")
+            metrics = await agent.collect_system_metrics()
+            active_epochs_str = f"[{', '.join(map(str, metrics.active_epochs))}]" if metrics.active_epochs else "[]"
+            logger.info(
+                "System Metrics | Memory: %.2fGB (%.1f%%) | System Load: %.2f | "
+                "Streams: %s | Active Epochs: %s | Blocks/sec: %.2f",
+                metrics.memory_used_gb,
+                metrics.memory_used_percent,
+                metrics.system_load,
+                metrics.redis_stream_depths,
+                active_epochs_str,
+                metrics.blocks_per_second
+            )
+            await _publish_metrics_to_redis(redis_client, metrics)
+    except (ConnectionError, TimeoutError) as e:
+        logger.error("Redis connection failed: %s", e)
+    except (OSError, MemoryError) as e:
+        logger.error("System resource error: %s", e)
+    except (ValueError, TypeError) as e:
+        logger.error("Data processing error: %s", e)
+    except Exception as e:  # noqa: BLE001
+        logger.error("Unexpected error in metrics collection: %s", e)
 
 
 async def _publish_metrics_to_redis(redis_client: redis.Redis, metrics: SystemMetrics) -> None:
