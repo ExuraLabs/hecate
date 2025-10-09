@@ -27,8 +27,7 @@ class MetricsAgent:
     Runs independently from sync workers, providing observability without impacting performance.
     """
 
-    def __init__(self, collection_interval: int = 30):
-        self.collection_interval = collection_interval
+    def __init__(self):
         self.redis_client: redis.Redis | None = None
         self._last_data_stream_len: int | None = None
         self._last_check_time: float | None = None
@@ -129,8 +128,7 @@ async def collect_and_publish_metrics() -> None:
     from prefect import get_run_logger
     logger = get_run_logger()
 
-    interval = get_monitoring_settings().collection_interval_seconds
-    agent = MetricsAgent(collection_interval=interval)
+    agent = MetricsAgent()
     try:
         async with redis.from_url(get_redis_settings().url) as redis_client:
             agent.redis_client = redis_client
