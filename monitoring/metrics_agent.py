@@ -5,9 +5,8 @@ from dataclasses import dataclass
 
 import psutil
 import redis.asyncio as redis
-from prefect import get_run_logger, task
 
-from config.settings import get_monitoring_settings, get_redis_settings 
+from config.settings import get_monitoring_settings, get_redis_settings
 
 
 @dataclass(slots=True, frozen=True)
@@ -126,9 +125,9 @@ class MetricsAgent:
         return delta_blocks / delta_time if delta_time > 0 else 0.0
 
 
-@task
 async def collect_and_publish_metrics() -> None:
-    """Task that collects and publishes system metrics."""
+    """Background task that collects and publishes system metrics periodically."""
+    from prefect import get_run_logger
     logger = get_run_logger()
 
     interval = get_monitoring_settings().collection_interval_seconds
