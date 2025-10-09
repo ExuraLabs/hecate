@@ -49,6 +49,14 @@ async def sync_epoch(
     Synchronize a specific epoch by fetching blocks of data in batches and 
     relaying them. This function handles connection management, error recovery,
     and proper cleanup for processing a single epoch.
+    
+    :param epoch: The epoch number to synchronize
+    :type epoch: EpochNumber
+    :param batch_size: Number of blocks to process per batch. Default 1000 when called directly,
+     typically matches BASE_BATCH_SIZE from settings (1000 in production).
+    :type batch_size: int
+    :return: The synchronized epoch number
+    :rtype: EpochNumber
     """
     logger = get_run_logger()
     epoch_start = time.perf_counter()
@@ -197,10 +205,12 @@ async def historical_sync_flow(
 
     :param start_epoch: The starting epoch for synchronization. Defaults to FIRST_SHELLEY_EPOCH.
     :type start_epoch: EpochNumber
-    :param batch_size: The number of records processed per batch for synchronization. Defaults to 100.
-    :type batch_size: int
-    :param concurrent_epochs: The number of epochs to process concurrently before waiting. Defaults to 6.
-    :type concurrent_epochs: int
+    :param batch_size: The number of blocks processed per batch for synchronization. 
+     Defaults to BASE_BATCH_SIZE from settings (typically 1000 in production).
+    :type batch_size: int | None
+    :param concurrent_epochs: The number of epochs to process concurrently. 
+     Defaults to DASK_N_WORKERS (6) from settings if not provided.
+    :type concurrent_epochs: int | None
     :return: This flow does not return any value.
     :rtype: None
     """

@@ -24,10 +24,12 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
     Asynchronous wrapper of the Ogmios websockets client.
     Inherits from OgmiosClient for type compatibility but implements
     its own async connection management as well as additional, higher-level methods.
-    It uses an EndpointScout to intelligently manage WebSocket connections to multiple Ogmios instances.
 
-    :param endpoint_scout: An EndpointScout instance for connection management. If not provided,
-        it will be created from environment variables.
+    :param connection: An existing WebSocket connection to use. If None, will create a new connection.
+    :param host: Hostname for new connections. Uses settings if not provided.
+    :param port: Port for new connections. Default 1337.
+    :param path: WebSocket path. Default empty string.
+    :param secure: Use WSS instead of WS. Default False.
     :param rpc_version: The JSON-RPC version to use.
     """
 

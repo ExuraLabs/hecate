@@ -115,7 +115,7 @@ class EndpointScout:
     Manages WebSocket connections to Ogmios endpoints.
     
     Supports two modes:
-    1. Simple mode: Single endpoint from OGMIOS_URL/OGMIOS_PORT (bypasses selection logic)
+    1. Simple mode: Single endpoint from OGMIOS_HOST/OGMIOS_PORT (bypasses selection logic)
     2. Multi-endpoint mode: Tests and selects best endpoint from configured list
     """
 
