@@ -148,13 +148,15 @@ class HistoricalRedisSink(DataSink):
         __aenter__ / __aexit__:
             Manage the Redis connection lifecycle and load the advance‐script.
         send_batch(epoch, blocks):
-            Atomically push a batch to the data stream, emit an event, and update resume position.
+            Atomically push a batch to the data stream with automatic backpressure handling.
         mark_epoch_complete(epoch) -> EpochNumber:
             Mark an epoch ready, log the event, and advance `last_synced_epoch` via lua script.
         get_last_synced_epoch() -> EpochNumber:
             Retrieve the current `last_synced_epoch` value from Redis, or start_epoch if missing.
         get_epoch_resume_height(epoch) -> BlockHeight | None:
             Retrieve the last processed block height for an in‐progress epoch.
+        is_backpressure_active() -> bool:
+            Check if backpressure is currently limiting processing.
         get_status() -> dict:
             Return health and progress metrics (e.g. synced epoch, pending counts, connection status).
         close():
@@ -246,13 +248,20 @@ class HistoricalRedisSink(DataSink):
             self.logger.debug("🛑 Redis connection closed")
 
     async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:
+        """
+        Send a batch of blocks to Redis, with automatic backpressure handling.
+        
+        This method will automatically pause if Redis streams are congested,
+        ensuring memory usage stays within safe limits. The backpressure
+        monitoring is transparent to the caller.
+        """
         if not self.redis:
             raise RuntimeError("Redis client not initialized")
         if not self.backpressure_monitor:
             raise RuntimeError("Backpressure monitor not initialized")
 
-        # Wait if backpressure is active
-        await self.backpressure_monitor.wait_if_paused()
+        # Backpressure control - this is where all flow control logic lives
+        await self._handle_backpressure()
 
         epoch = kwargs.pop("epoch")
         
@@ -283,6 +292,28 @@ class HistoricalRedisSink(DataSink):
         await pipe.execute()
 
         self.logger.debug("Sent batch for epoch %s, up to height %s", epoch, last_height)
+
+    async def _handle_backpressure(self) -> None:
+        """
+        Internal method to handle backpressure control.
+        
+        This encapsulates all backpressure logic within the sink,
+        keeping it isolated from the flow control layer.
+        """
+        if self.backpressure_monitor:
+            await self.backpressure_monitor.wait_if_paused()
+
+    def is_backpressure_active(self) -> bool:
+        """
+        Check if backpressure is currently active.
+        
+        Returns:
+            True if processing should be paused due to backpressure
+        """
+        return (
+            self.backpressure_monitor is not None 
+            and self.backpressure_monitor.is_paused
+        )
 
     async def mark_epoch_complete(
         self, epoch: EpochNumber, last_height: BlockHeight,
