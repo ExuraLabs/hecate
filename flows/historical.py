@@ -100,7 +100,7 @@ async def _stream_and_batch_blocks(
     epoch: EpochNumber,
     initial_batch_size: int,
     run_logger: Any,
-    block_factory: Callable | None = None,
+    block_factory: Callable[..., Block] | None = None,
     ) -> int | None:
     """
     Stream blocks from client and process them in adaptive batches.

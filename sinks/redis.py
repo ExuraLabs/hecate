@@ -28,23 +28,23 @@ class RedisSink(DataSink):
         prefix: str = "hecate:",
         **redis_kwargs: Any,
     ):
-        """Initialize Redis connection"""
+        """Initialize Redis connection."""
         self.redis = aioredis.Redis(host=host, port=port, db=db, **redis_kwargs)
         self.prefix = prefix
         self.block_queue = f"{self.prefix}blocks"
         self.status_key = f"{self.prefix}status"
 
     async def send_block(self, block: Block) -> None:
-        """Send a block to Redis"""
+        """Send a block to Redis."""
         block_data = await self._prepare_block(block)
         await self.redis.rpush(self.block_queue, json.dumps(block_data))
         await self.redis.hset(self.status_key, "last_block_hash", block_data["hash"])
         await self.redis.hset(
-            self.status_key, "last_block_slot", str(block_data["slot"])
+            self.status_key, "last_block_slot", str(block_data["slot"]),
         )
 
     async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:
-        """Send a batch of blocks to Redis"""
+        """Send a batch of blocks to Redis."""
         if not blocks:
             return
 
@@ -71,6 +71,7 @@ class RedisSink(DataSink):
         }
 
     async def close(self) -> None:
+        """Close the Redis connection."""
         await self.redis.close()
 
     @classmethod
@@ -218,7 +219,7 @@ class HistoricalRedisSink(DataSink):
     async def __aenter__(self):
         url = self._redis_settings.url
         self.redis = aioredis.from_url(url, decode_responses=False)
-        self.logger.debug(f"🔗 Connecting to Redis at {url}")
+        self.logger.debug("🔗 Connecting to Redis at %s", url)
 
         # Initialize and start backpressure monitor
         self.backpressure_monitor = RedisBackpressureMonitor(
@@ -245,8 +246,10 @@ class HistoricalRedisSink(DataSink):
             self.logger.debug("🛑 Redis connection closed")
 
     async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:
-        assert self.redis, "Not initialized"
-        assert self.backpressure_monitor, "Backpressure monitor not initialized"
+        if not self.redis:
+            raise RuntimeError("Redis client not initialized")
+        if not self.backpressure_monitor:
+            raise RuntimeError("Backpressure monitor not initialized")
 
         # Wait if backpressure is active
         await self.backpressure_monitor.wait_if_paused()
@@ -279,13 +282,13 @@ class HistoricalRedisSink(DataSink):
         pipe.hset(self.resume_map, epoch, last_height)
         await pipe.execute()
 
-        self.logger.debug(f"Sent batch for epoch {epoch}, up to height {last_height}")
+        self.logger.debug("Sent batch for epoch %s, up to height %s", epoch, last_height)
 
     async def mark_epoch_complete(
-        self, epoch: EpochNumber, last_height: BlockHeight
+        self, epoch: EpochNumber, last_height: BlockHeight,
     ) -> EpochNumber:
         """
-        Marks an epoch as complete by updating Redis with the relevant information
+        Mark an epoch as complete by updating Redis with the relevant information
         and logging the event. This function performs two main tasks:
 
         1. Adds the epoch to a set of completed epochs and logs the completion event,
@@ -303,7 +306,8 @@ class HistoricalRedisSink(DataSink):
         :return: The updated last synced epoch number after Redis executes the Lua script.
         :rtype: EpochNumber
         """
-        assert self.redis and self._advance_sha, "Redis not initialized"
+        if not (self.redis and self._advance_sha):
+            raise RuntimeError("Redis not initialized")
         # 1) enqueue into ready_set & log event
         pipe = self.redis.pipeline(transaction=True)
         pipe.sadd(self.ready_set, epoch)
@@ -325,27 +329,34 @@ class HistoricalRedisSink(DataSink):
         )
         last_synced = EpochNumber(int(latest_epoch))
         self.logger.info(
-            f"Epoch {epoch} marked complete; last_synced_epoch → {last_synced}"
+            "Epoch %s marked complete; last_synced_epoch → %s",
+            epoch,
+            last_synced,
         )
         return last_synced
 
     async def get_last_synced_epoch(self) -> EpochNumber:
-        """Get the last synced epoch from Redis, or `start_epoch` if not set"""
-        assert self.redis, "Not initialized"
+        """Get the last synced epoch from Redis, or `start_epoch` if not set."""
+        if not self.redis:
+            raise RuntimeError("Redis client not initialized")
         val = await self.redis.get(self.last_synced_epoch)
         return EpochNumber(int(val)) if val else self.start_epoch
 
     async def get_epoch_resume_height(self, epoch: EpochNumber) -> BlockHeight | None:
-        assert self.redis, "Not initialized"
+        """Get the resume height for a specific epoch."""
+        if not self.redis:
+            raise RuntimeError("Redis client not initialized")
         val = await self.redis.hget(self.resume_map, epoch)
         return BlockHeight(int(val)) if val else None
 
     async def get_status(self) -> dict[str, Any]:
-        assert self.redis, "Not initialized"
+        """Get the status of the Redis sink."""
+        if not self.redis:
+            raise RuntimeError("Redis client not initialized")
         return {
             "last_synced_epoch": await self.get_last_synced_epoch(),
             "epochs_individually_completed_pending_sync": await self.redis.scard(
-                self.ready_set
+                self.ready_set,
             ),
             "epochs_with_active_resume_points": await self.redis.hlen(self.resume_map),
             "redis_connection": "ok",

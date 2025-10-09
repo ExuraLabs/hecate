@@ -6,7 +6,7 @@ from ogmios.client import Client as OgmiosClient
 from ogmios.model.ogmios_model import Jsonrpc
 import orjson as json
 from websockets import ClientConnection, connect
-from websockets.connection import State
+from websockets.protocol import State
 
 from client.chainsync import AsyncFindIntersection, AsyncNextBlock
 from client.ledgerstate import AsyncEpoch, AsyncEraSummaries, AsyncTip

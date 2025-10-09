@@ -4,7 +4,7 @@ import time
 from typing import Protocol
 from dataclasses import dataclass
 from websockets import ClientConnection, connect, ConnectionClosed
-from websockets.connection import State
+from websockets.protocol import State
 from pydantic import WebsocketUrl
 
 logger = logging.getLogger(__name__)
