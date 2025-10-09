@@ -1,8 +1,7 @@
 import asyncio
 import time
-from typing import Any, Callable
+from typing import Any
 
-import ogmios.model.model_map as mm
 from ogmios import Block
 from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
@@ -19,25 +18,9 @@ from network.endpoint_scout import EndpointScout
 from sinks.redis import HistoricalRedisSink
 
 
-def create_fast_block(blocktype: mm.Types, **kwargs: Any) -> Block:
-    """
-    Fast factory for Block objects that bypasses Pydantic validation.
-    Directly assigns attributes from kwargs without validation.
-    Use ONLY for historical sync, not for real-time blocks.
-    """
-    block = Block.__new__(Block)
-    block.blocktype = blocktype
-    
-    # Use __dict__ assignment for better performance
-    block.__dict__.update(kwargs)
-    block._schematype = None
-    
-    return block
-
-
 @task(
     retries=3,
-    retry_delay_seconds=30,
+    retry_delay_seconds=10,
     cache_policy=NO_CACHE,
     task_run_name="sync_epoch_{epoch}",
 )
@@ -90,9 +73,8 @@ async def _process_epoch_blocks(
     run_logger: Any,
 ) -> int | None:
     """Process all blocks for an epoch, handling batching and memory management."""
-    # Usar la factory para crear bloques históricos en vez de monkey patching
     return await _stream_and_batch_blocks(
-        client, sink, epoch, initial_batch_size, run_logger, block_factory=create_fast_block
+        client, sink, epoch, initial_batch_size, run_logger
     )
 
 
@@ -102,7 +84,6 @@ async def _stream_and_batch_blocks(
     epoch: EpochNumber,
     initial_batch_size: int,
     run_logger: Any,
-    block_factory: Callable[..., Block] | None = None,
     ) -> int | None:
     """
     Stream blocks from client and process them in adaptive batches.
@@ -133,11 +114,6 @@ async def _stream_and_batch_blocks(
             for block in blocks:
                 if _should_skip_block(block, resume_height):
                     continue
-                # Si se pasa una factory, usarla para crear el bloque
-                if block_factory:
-                    block_dict = dict(block.__dict__)
-                    block_dict.pop('blocktype', None)
-                    block = block_factory(block.blocktype, **block_dict)
                 batch.append(block)
                 last_height = block.height
 
