@@ -18,6 +18,10 @@ from network.endpoint_scout import EndpointScout
 from sinks.redis import HistoricalRedisSink
 
 
+COMMON_ERRORS = (ConnectionError, TimeoutError, RuntimeError, OSError,
+                 asyncio.TimeoutError)
+
+
 @task(
     retries=3,
     retry_delay_seconds=10,
@@ -193,7 +197,7 @@ async def historical_sync_flow(
         logger.info("Collecting initial metrics before historical sync...")
         try:
             await collect_and_publish_metrics(metrics_agent)
-        except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
+        except COMMON_ERRORS as e:
             logger.warning("Failed to collect initial metrics: %s", e)
 
         async with HistoricalRedisSink(start_epoch=start_epoch) as sink:
@@ -226,7 +230,7 @@ async def historical_sync_flow(
                     final_batch_size,
                     metrics_agent
                 )
-            except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
+            except COMMON_ERRORS as e:
                 logger.error(
                     "Failed to process batch starting at index %d: %s",
                     batch_start_index, e
@@ -245,7 +249,7 @@ async def historical_sync_flow(
         logger.info("Collecting final metrics after historical sync...")
         try:
             await collect_and_publish_metrics(metrics_agent)
-        except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
+        except COMMON_ERRORS as e:
             logger.warning("Failed to collect final metrics: %s", e)
 
     
@@ -292,7 +296,7 @@ async def process_batch(
     try:
         await collect_and_publish_metrics(metrics_agent)
         logger.debug("Metrics collection completed for batch %d", batch_number)
-    except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
+    except COMMON_ERRORS as e:
         logger.warning("Failed to collect metrics for batch %d: %s", batch_number, e)
 
     futures = sync_epoch.map(
