@@ -1,13 +1,16 @@
 import logging
 import time
+import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING
 
-from prefect import get_run_logger
 import psutil
 import redis.asyncio as redis
 
 from config.settings import get_redis_settings
+
+if TYPE_CHECKING:
+    from typing import Self
 
 
 @dataclass(slots=True, frozen=True)
@@ -27,24 +30,43 @@ class MetricsAgent:
     """
     Agent that collects system metrics in a centralized way.
     Runs independently from sync workers, providing observability without impacting performance.
+    
+    Implemented as singleton to maintain state (last measurements) between calls
+    for accurate blocks/second calculation.
     """
-
-
+    
     _instance = None
+    _lock = threading.Lock()
 
-    def __new__(cls, *args, **kwargs):
+    def __new__(cls):
+        """Thread-safe singleton implementation."""
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
         return cls._instance
 
     def __init__(self):
-        if hasattr(self, '_initialized') and self._initialized:
+        # Only initialize once
+        if hasattr(self, '_initialized'):
             return
+            
         self.redis_client: redis.Redis | None = None
         self._last_data_stream_len: int | None = None
         self._last_check_time: float | None = None
         self.logger = logging.getLogger(__name__)
         self._initialized = True
+
+    @classmethod
+    def get_instance(cls) -> "MetricsAgent":
+        """Get the singleton instance of MetricsAgent."""
+        return cls()
+
+    @classmethod
+    def reset_instance(cls) -> None:
+        """Reset the singleton instance (useful for testing)."""
+        with cls._lock:
+            cls._instance = None
 
     async def collect_system_metrics(self) -> SystemMetrics:
         """Collects metrics from the entire system, including blocks per second."""
@@ -92,21 +114,55 @@ class MetricsAgent:
         return stream_depths, stream_depths.get("hecate:history:data_stream")
 
     async def _collect_active_epochs(self) -> list[int]:
-        """Collect active epochs with safe defaults."""
+        """
+        Collect active epochs with safe defaults.
+        
+        Looks for epochs that are currently being processed by checking:
+        1. resume_map: epochs with active resume positions
+        2. ready_set: epochs completed but awaiting sequential commit
+        3. recent data_stream entries: epochs that have sent batches recently
+        """
         if not self.redis_client:
             return []
             
         try:
-            resume_map_data = await self.redis_client.hgetall("hecate:history:resume_map")
-            active_epochs = []
+            active_epochs = set()
             
-            for epoch_str in resume_map_data.keys():
+            # Check resume_map for epochs with active resume positions
+            resume_map_data = await self.redis_client.hgetall("hecate:history:resume_map")
+            for epoch_bytes in resume_map_data.keys():
+                epoch_str = epoch_bytes.decode() if isinstance(epoch_bytes, bytes) else str(epoch_bytes)
                 if epoch_str.isdigit():
-                    active_epochs.append(int(epoch_str))
+                    active_epochs.add(int(epoch_str))
                 else:
                     self.logger.warning("Invalid epoch key in resume_map: %s", epoch_str)
             
-            return sorted(active_epochs)
+            # Check ready_set for epochs awaiting sequential commit
+            try:
+                ready_set_data = await self.redis_client.smembers("hecate:history:ready_set")
+                for epoch_bytes in ready_set_data:
+                    epoch_str = epoch_bytes.decode() if isinstance(epoch_bytes, bytes) else str(epoch_bytes)
+                    if epoch_str.isdigit():
+                        active_epochs.add(int(epoch_str))
+            except (ConnectionError, TimeoutError, OSError):
+                self.logger.debug("Could not read ready_set for active epochs")
+            
+            # Check recent entries in data_stream for recently active epochs
+            try:
+                recent_entries = await self.redis_client.xrevrange(
+                    "hecate:history:data_stream", 
+                    count=50  # Look at last 50 entries
+                )
+                for entry_id, fields in recent_entries:
+                    if b'epoch' in fields:
+                        epoch_str = fields[b'epoch'].decode()
+                        if epoch_str.isdigit():
+                            active_epochs.add(int(epoch_str))
+            except (ConnectionError, TimeoutError, OSError):
+                self.logger.debug("Could not read data_stream for active epochs")
+            
+            return sorted(list(active_epochs))
+            
         except (ConnectionError, TimeoutError, OSError):
             self.logger.warning("Failed to collect active epochs")
             return []
@@ -119,10 +175,20 @@ class MetricsAgent:
             return 0.0
 
     def _calculate_blocks_per_second(self, data_stream_len: int | None, now: float) -> float:
-        """Calculate blocks per second with safe defaults."""
-        if (data_stream_len is None or 
-            self._last_data_stream_len is None or 
-            self._last_check_time is None):
+        """
+        Calculate blocks per second with safe defaults.
+        
+        This method maintains state between calls to provide accurate rate calculation.
+        Since the MetricsAgent is now a singleton, the state persists across metric collections.
+        """
+        if data_stream_len is None:
+            # If we can't get stream length, reset state and return 0
+            self._last_data_stream_len = None
+            self._last_check_time = now
+            return 0.0
+            
+        if (self._last_data_stream_len is None or self._last_check_time is None):
+            # First measurement - initialize state and return 0
             self._last_data_stream_len = data_stream_len
             self._last_check_time = now
             return 0.0
@@ -133,15 +199,35 @@ class MetricsAgent:
         self._last_data_stream_len = data_stream_len
         self._last_check_time = now
         
-        return delta_blocks / delta_time if delta_time > 0 else 0.0
+        # Avoid division by zero and handle edge cases
+        if delta_time <= 0:
+            return 0.0
+            
+        blocks_per_second = delta_blocks / delta_time
+        
+        # Log debug info for troubleshooting
+        if delta_blocks > 0:
+            self.logger.debug(
+                "Blocks/sec calculation: %d blocks in %.2fs = %.2f blocks/sec",
+                delta_blocks, delta_time, blocks_per_second
+            )
+        
+        return max(0.0, blocks_per_second)  # Ensure non-negative
 
 
-async def collect_and_publish_metrics(agent: Optional['MetricsAgent'] = None) -> None:
-    """Collect and publish system metrics once (called periodically by the flow)."""
+async def collect_and_publish_metrics(agent: MetricsAgent | None = None) -> None:
+    """
+    Collect and publish system metrics once (called periodically by the flow).
+    
+    Args:
+        agent: Optional MetricsAgent instance. If None, gets the singleton instance.
+    """
+    from prefect import get_run_logger
     logger = get_run_logger()
 
     if agent is None:
-        agent: MetricsAgent = MetricsAgent()
+        agent = MetricsAgent.get_instance()
+        
     try:
         async with redis.from_url(get_redis_settings().url) as redis_client:
             agent.redis_client = redis_client

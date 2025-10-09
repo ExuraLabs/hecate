@@ -6,7 +6,6 @@ from typing import Any, Callable
 import ogmios.model.model_map as mm
 from ogmios import Block
 from prefect import flow, get_run_logger, task
-from prefect import map as prefect_map
 from prefect.cache_policies import NO_CACHE
 from prefect.futures import wait
 from prefect_dask import DaskTaskRunner  # type: ignore[attr-defined]
@@ -214,16 +213,19 @@ async def historical_sync_flow(
     logger = get_run_logger()
     flow_start = time.perf_counter()
 
-    metrics_agent: MetricsAgent = MetricsAgent()
+    # Initialize singleton metrics agent for this flow
+    metrics_agent = MetricsAgent.get_instance()
+
     try:
         # Load settings from centralized config if not provided explicitly
         batch_settings = get_batch_settings()
         final_batch_size = batch_size or batch_settings.base_size
         final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers
 
-        # Singleton MetricsAgent for metrics collection
+        # Initial metrics collection before starting sync
+        logger.info("Collecting initial metrics before historical sync...")
         try:
-            await collect_and_publish_metrics(agent=metrics_agent)
+            await collect_and_publish_metrics(metrics_agent)
         except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
             logger.warning("Failed to collect initial metrics: %s", e)
 
@@ -275,7 +277,7 @@ async def historical_sync_flow(
         # Collect final metrics before closing
         logger.info("Collecting final metrics after historical sync...")
         try:
-            await collect_and_publish_metrics(agent=metrics_agent)
+            await collect_and_publish_metrics(metrics_agent)
         except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
             logger.warning("Failed to collect final metrics: %s", e)
 
@@ -301,6 +303,7 @@ async def process_batch(
         batch_start_index: Starting index in the epochs list for this batch
         epochs: Complete list of epochs to process
         batch_size: Number of blocks to process per epoch batch
+        metrics_agent: Singleton metrics agent instance for state persistence
         
     Note:
         The scout parameter is commented out but would be used for connection management
@@ -319,12 +322,15 @@ async def process_batch(
 
     # Collect metrics at the start of each batch
     try:
-        await collect_and_publish_metrics(agent=metrics_agent)
+        await collect_and_publish_metrics(metrics_agent)
         logger.debug("Metrics collection completed for batch %d", batch_number)
     except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
         logger.warning("Failed to collect metrics for batch %d: %s", batch_number, e)
 
-    futures = prefect_map(sync_epoch, epoch=batch_epochs, batch_size=[batch_size]*len(batch_epochs))
+    futures = sync_epoch.map(
+        epoch=batch_epochs,
+        batch_size=batch_size
+    )
     wait(futures)
 
     batch_end_time = time.perf_counter()
