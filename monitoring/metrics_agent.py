@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import psutil
 import redis.asyncio as redis
 
-from config.settings import get_monitoring_settings, get_redis_settings
+from config.settings import get_redis_settings
 
 
 @dataclass(slots=True, frozen=True)
