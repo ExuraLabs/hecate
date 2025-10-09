@@ -274,7 +274,7 @@ async def historical_sync_flow(
         logger.info("Collecting final metrics after historical sync...")
         try:
             await collect_and_publish_metrics()
-        except Exception as e:
+        except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError) as e:
             logger.warning("Failed to collect final metrics: %s", e)
 
     
