@@ -7,37 +7,60 @@ document covers the available flows, their configuration options, and usage patt
 
 ### Historical Synchronization Flow
 
-The historical sync flow efficiently retrieves and processes past blockchain data:
+
+The historical sync flow efficiently retrieves and processes past blockchain data, with integrated metrics monitoring at every relevant stage. The current logic ensures robust, resumable, and observable execution:
+
+#### Execution
 
 ```bash
-# Run historical sync from a specific epoch to the current checkpoint
 uv run python -m flows.historical --start-epoch=208 --batch-size=1000
 ```
 
-#### Features
+#### How It Works (2025)
 
-- **Resumable Processing**: Automatically continues from the last synced epoch
-- **Concurrent Execution**: Processes multiple epochs in parallel using Dask
-- **Memory Efficient**: Streams data in configurable batches to control memory usage
-- **Failure Recovery**: Retries failed tasks and maintains sync progress
-- **Multi-level Checkpointing**:
-    - Tracks last successful block height per epoch
-    - Manages completion status across epochs
-    - Ensures data consistency through atomic operations
+- **Resumable & Concurrent**: The flow detects the last synced epoch and continues from there, processing multiple epochs in parallel using Prefect and Dask.
+- **Batch Processing**: Epochs are processed in concurrent batches, each subdivided into block batches for optimal memory and performance.
+- **Factory Pattern**: Historical blocks are created via a fast factory, bypassing unnecessary validation for speed.
+- **Integrated Metrics**: Metrics collection and publishing occur:
+  - At the start of the flow
+  - At the start of each batch of epochs
+  - At the end of the flow
+  This ensures periodic visibility, synchronized with actual progress and batch advancement.
+- **Error Handling**: Errors in epoch or batch sync are logged, and the flow continues with the next batch, preventing total blockage.
+- **Checkpointing & Recovery**: Progress state is saved in Redis, allowing resume from the last successful point in case of failure.
 
-#### Redis Integration
+#### Redis Integration & State Management
 
-The flow uses Redis for state management and data delivery:
-
-- **Connection**: Uses `REDIS_URL` environment variable (defaults to `redis://localhost:6379/0`)
+- **Redis** manages:
+  - Last synced epoch
+  - Resume maps per epoch
+  - Data and event streams
 - **Key Structure**:
     - `<prefix>last_synced_epoch`: Highest sequentially completed epoch
     - `<prefix>ready_set`: Set of completed epochs awaiting sequential commit
     - `<prefix>resume_map`: Hash of in-progress epochs' resume positions
     - `<prefix>data_stream`: Stream of block-batch payloads
     - `<prefix>event_stream`: Stream of audit/control events
+- **Configurable prefixes** isolate state for each run. Default prefix is `hecate:history:` and can be configured when initializing the sink.
 
-Default prefix is `hecate:history:` and can be configured when initializing the sink.
+#### Relevant Configuration
+
+- `start_epoch`: Initial epoch to sync
+- `batch_size`: Block batch size per epoch
+- `n_workers`: Dask concurrency core
+- Environment variables for Redis and Dask (see settings)
+
+#### Example Execution Cycle
+
+1. Initial metrics are collected.
+2. The range of epochs to process is determined.
+3. For each batch of epochs:
+   - Metrics are collected.
+   - Epochs are processed concurrently.
+   - Progress and errors are logged.
+4. On completion, final metrics are collected and total time is logged.
+
+---
 
 ### Periodic Flow
 
