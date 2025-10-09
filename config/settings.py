@@ -63,15 +63,6 @@ class BatchSettings(BaseSettings):
     max_size: int = Field(alias="MAX_BATCH_SIZE", default=1000)
 
 
-class MonitoringSettings(BaseSettings):
-    """Monitoring and metrics settings."""
-
-    model_config = SettingsConfigDict(
-        env_file=env_file, env_file_encoding="utf-8", extra="ignore"
-    )
-    collection_interval_seconds: int = Field(alias="COLLECTION_INTERVAL", default=5)
-
-
 class OgmiosSettings(BaseSettings):
     """Ogmios multi-source balancer settings."""
 
@@ -125,18 +116,10 @@ def get_batch_settings() -> BatchSettings:
 
 
 @lru_cache
-def get_monitoring_settings() -> MonitoringSettings:
-    """Get cached monitoring and metrics collection settings."""
-    return MonitoringSettings()
-
-
-@lru_cache
 def get_ogmios_settings() -> OgmiosSettings:
     """
     Get cached Ogmios endpoint configuration settings.
     """
-    # Set the environment variable for other parts of the app that might use it directly
-    # os.environ["OGMIOS_ENDPOINTS"] = OgmiosSettings().endpoints
     return OgmiosSettings()
 
 
@@ -152,7 +135,6 @@ def load_all_settings() -> None:
     get_memory_settings()
     get_redis_settings()
     get_batch_settings()
-    get_monitoring_settings()
     get_ogmios_settings()
 
 

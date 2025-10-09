@@ -63,7 +63,6 @@ deployments:
           BASE_BATCH_SIZE: "{{ prefect.variables.base_batch_size }}"
           MIN_BATCH_SIZE: "{{ prefect.variables.min_batch_size }}"
           MAX_BATCH_SIZE: "{{ prefect.variables.max_batch_size }}"
-          COLLECTION_INTERVAL: "{{ prefect.variables.collection_interval }}"
           OGMIOS_HOST: "{{ prefect.variables.ogmios_host }}"
           OGMIOS_PORT: "{{ prefect.variables.ogmios_port }}"
     version:
