@@ -1,5 +1,6 @@
 import logging
 import time
+import threading
 from typing import Any
 
 from config.settings import get_batch_settings, get_memory_settings
@@ -28,51 +29,99 @@ class AdaptiveMemoryController:
     - Orchestrate the specialized components
     - Maintain backward compatibility
     - Provide the main public interface
+    - Ensure single instance per flow execution
     """
+    
+    _instance = None
+    _lock = threading.Lock()
+    _initialized = False
+
+    def __new__(cls, config: MemoryConfig | None = None) -> "AdaptiveMemoryController":
+        """
+        Thread-safe singleton implementation for Dask workers.
+        
+        In Prefect 3.3.3 with Dask, each worker process may try to create
+        an instance simultaneously. This ensures only one instance exists
+        per worker process.
+        """
+        if cls._instance is None:
+            with cls._lock:
+                # Double-check locking pattern
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
 
     def __init__(self, config: MemoryConfig | None = None):
-        if config is None:
-            memory_settings = get_memory_settings()
-            config = MemoryConfig(**memory_settings.model_dump())
+        # Only initialize once, even if __init__ is called multiple times
+        if self._initialized:
+            return
+            
+        with self._lock:
+            if self._initialized:
+                return
+                
+            if config is None:
+                memory_settings = get_memory_settings()
+                config = MemoryConfig(**memory_settings.model_dump())
 
-        self.config = config
-        self._last_check_time: float = 0
-        self._last_decision: MemoryDecision | None = None
-        
-        # Initialize specialized components
-        self.monitor = MemoryMonitor(config)
-        self.policy_engine = MemoryPolicyEngine(config)
-        
-        batch_settings = get_batch_settings()
-        self.batch_adaptor = BatchSizeAdaptor(
-            min_batch_size=batch_settings.min_size,
-            max_batch_size=batch_settings.max_size
-        )
-        
-        self.process_controller = ProcessController(
-            pause_interval_seconds=config.check_interval_seconds
-        )
+            self.config = config
+            self._last_check_time: float = 0
+            self._last_decision: MemoryDecision | None = None
+            
+            # Initialize specialized components
+            self.monitor = MemoryMonitor(config)
+            self.policy_engine = MemoryPolicyEngine(config)
+            
+            batch_settings = get_batch_settings()
+            self.batch_adaptor = BatchSizeAdaptor(
+                min_batch_size=batch_settings.min_size,
+                max_batch_size=batch_settings.max_size
+            )
+            
+            self.process_controller = ProcessController(
+                pause_interval_seconds=config.check_interval_seconds
+            )
 
-        self.logger = get_contextual_logger()
-        self.logger.info(
-            "AdaptiveMemoryController initialized with limit: %.2f GB",
-            self.config.memory_limit_gb
-        )
-        self.logger.debug(
-            "  - Warning threshold:  %.2f GB (%.0f%%)",
-            config.memory_limit_gb * config.warning_threshold, 
-            config.warning_threshold * 100
-        )
-        self.logger.debug(
-            "  - Critical threshold: %.2f GB (%.0f%%)",
-            config.memory_limit_gb * config.critical_threshold, 
-            config.critical_threshold * 100
-        )
-        self.logger.debug(
-            "  - Emergency threshold: %.2f GB (%.0f%%)",
-            config.memory_limit_gb * config.emergency_threshold, 
-            config.emergency_threshold * 100
-        )
+            self.logger = get_contextual_logger()
+            self.logger.info(
+                "AdaptiveMemoryController initialized as singleton with limit: %.2f GB",
+                self.config.memory_limit_gb
+            )
+            self.logger.debug(
+                "  - Warning threshold:  %.2f GB (%.0f%%)",
+                config.memory_limit_gb * config.warning_threshold, 
+                config.warning_threshold * 100
+            )
+            self.logger.debug(
+                "  - Critical threshold: %.2f GB (%.0f%%)",
+                config.memory_limit_gb * config.critical_threshold, 
+                config.critical_threshold * 100
+            )
+            self.logger.debug(
+                "  - Emergency threshold: %.2f GB (%.0f%%)",
+                config.memory_limit_gb * config.emergency_threshold, 
+                config.emergency_threshold * 100
+            )
+            
+            # Mark as initialized
+            self._initialized = True
+
+    @classmethod
+    def reset_singleton(cls) -> None:
+        """
+        Reset the singleton instance.
+        
+        Useful for testing or when starting a new flow execution.
+        Should be called with caution in production.
+        """
+        with cls._lock:
+            cls._instance = None
+            cls._initialized = False
+
+    @classmethod
+    def is_initialized(cls) -> bool:
+        """Check if the singleton instance is already initialized."""
+        return cls._initialized
 
     def check_memory_and_adapt(
         self, epoch: int, original_batch_size: int, current_batch_size: int
