@@ -49,7 +49,7 @@ async def sync_epoch(
         connection = await scout.get_best_connection()
         
         async with (HistoricalRedisSink() as sink, HecateClient(connection) as client):
-            last_height = await _process_epoch_blocks(
+            last_height = await _stream_and_batch_blocks(
                 client, sink, epoch, batch_size, logger
             )
 
@@ -63,19 +63,6 @@ async def sync_epoch(
         epoch_end = time.perf_counter()
         logger.info("✅ Epoch %s sync complete in %.2fs", epoch, epoch_end - epoch_start)
         return epoch
-
-
-async def _process_epoch_blocks(
-    client: HecateClient,
-    sink: HistoricalRedisSink,
-    epoch: EpochNumber,
-    initial_batch_size: int,
-    run_logger: Any,
-) -> int | None:
-    """Process all blocks for an epoch, handling batching and memory management."""
-    return await _stream_and_batch_blocks(
-        client, sink, epoch, initial_batch_size, run_logger
-    )
 
 
 async def _stream_and_batch_blocks(
