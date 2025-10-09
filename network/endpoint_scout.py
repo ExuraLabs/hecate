@@ -7,6 +7,8 @@ from websockets import ClientConnection, connect, ConnectionClosed
 from websockets.protocol import State
 from pydantic import WebsocketUrl
 
+from config.settings import get_ogmios_settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -133,11 +135,18 @@ class EndpointScout:
         self.metrics: dict[WebsocketUrl, ConnectionMetrics] = {}
         self._monitoring_task: asyncio.Task[None] | None = None
 
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit with proper cleanup."""
+        await self.close_all_connections()
+
     def _determine_mode_and_endpoints(
         self
     ) -> tuple[bool, list[WebsocketUrl]]:
         """Determine connection mode and get appropriate endpoints."""
-        from config.settings import get_ogmios_settings
         settings = get_ogmios_settings()
 
         # Simple mode: if both ogmios_host and ogmios_port are provided (EXCLUSIVE mode)
@@ -154,8 +163,6 @@ class EndpointScout:
     @staticmethod
     def _load_endpoints_from_settings() -> list[WebsocketUrl]:
         try:
-            from config.settings import get_ogmios_settings
-
             settings = get_ogmios_settings()
             endpoints = [
                 WebsocketUrl(ep["url"]) for ep in settings.endpoints if ep.get("url")

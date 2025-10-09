@@ -1,6 +1,5 @@
 import asyncio
 import time
-from asyncio.log import logger
 from typing import Any, Callable
 
 import ogmios.model.model_map as mm
@@ -28,9 +27,11 @@ def create_fast_block(blocktype: mm.Types, **kwargs: Any) -> Block:
     """
     block = Block.__new__(Block)
     block.blocktype = blocktype
-    for key, value in kwargs.items():
-        setattr(block, key, value)
+    
+    # Use __dict__ assignment for better performance
+    block.__dict__.update(kwargs)
     block._schematype = None
+    
     return block
 
 
@@ -53,8 +54,7 @@ async def sync_epoch(
     epoch_start = time.perf_counter()
     logger.debug("▶️  Starting sync for epoch %s", epoch)
 
-    scout = EndpointScout()
-    try:
+    async with EndpointScout() as scout:
         connection = await scout.get_best_connection()
         
         async with (HistoricalRedisSink() as sink, HecateClient(connection) as client):
@@ -72,12 +72,6 @@ async def sync_epoch(
         epoch_end = time.perf_counter()
         logger.info("✅ Epoch %s sync complete in %.2fs", epoch, epoch_end - epoch_start)
         return epoch
-
-    except Exception as e:
-        logger.error("Failed to sync epoch %s: %s", epoch, e)
-        raise
-    finally:
-        await scout.close_all_connections()
 
 
 async def _process_epoch_blocks(
@@ -308,6 +302,7 @@ async def process_batch(
     Note:
         The scout parameter is commented out but would be used for connection management
     """
+    logger = get_run_logger()
     batch_start_time = time.perf_counter()
     batch_epochs = epochs[batch_start_index : batch_start_index + max_concurrent_epochs]
     batch_number = (batch_start_index // max_concurrent_epochs) + 1

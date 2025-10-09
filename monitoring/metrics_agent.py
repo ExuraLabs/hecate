@@ -2,15 +2,17 @@ import logging
 import time
 import threading
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import psutil
 import redis.asyncio as redis
 
 from config.settings import get_redis_settings
 
-if TYPE_CHECKING:
-    from typing import Self
+
+# Common exception types for Redis and system operations
+REDIS_ERRORS = (ConnectionError, TimeoutError, OSError)
+SYSTEM_ERRORS = (OSError, AttributeError)
+ALL_COMMON_ERRORS = (ConnectionError, TimeoutError, RuntimeError, OSError)
 
 
 @dataclass(slots=True, frozen=True)
@@ -47,15 +49,17 @@ class MetricsAgent:
         return cls._instance
 
     def __init__(self):
-        # Only initialize once
-        if hasattr(self, '_initialized'):
-            return
-            
-        self.redis_client: redis.Redis | None = None
-        self._last_data_stream_len: int | None = None
-        self._last_check_time: float | None = None
-        self.logger = logging.getLogger(__name__)
-        self._initialized = True
+        # Only initialize once, even if __init__ is called multiple times
+        # Use lock to prevent race condition during initialization
+        with self._lock:
+            if hasattr(self, '_initialized'):
+                return
+                
+            self.redis_client: redis.Redis | None = None
+            self._last_data_stream_len: int | None = None
+            self._last_check_time: float | None = None
+            self.logger = logging.getLogger(__name__)
+            self._initialized = True
 
     @classmethod
     def get_instance(cls) -> "MetricsAgent":
@@ -94,7 +98,7 @@ class MetricsAgent:
         try:
             memory = psutil.virtual_memory()
             return (memory.total - memory.available) / (1024**3), memory.percent
-        except (OSError, AttributeError):
+        except SYSTEM_ERRORS:
             self.logger.warning("Failed to collect memory metrics, using defaults")
             return 0.0, 0.0
 
@@ -107,7 +111,7 @@ class MetricsAgent:
         for stream in ["hecate:history:data_stream", "hecate:history:event_stream"]:
             try:
                 stream_depths[stream] = await self.redis_client.xlen(stream)
-            except (ConnectionError, TimeoutError, OSError):
+            except REDIS_ERRORS:
                 self.logger.warning("Failed to get length for stream %s", stream)
                 stream_depths[stream] = 0
         
@@ -144,7 +148,7 @@ class MetricsAgent:
                     epoch_str = epoch_bytes.decode() if isinstance(epoch_bytes, bytes) else str(epoch_bytes)
                     if epoch_str.isdigit():
                         active_epochs.add(int(epoch_str))
-            except (ConnectionError, TimeoutError, OSError):
+            except REDIS_ERRORS:
                 self.logger.debug("Could not read ready_set for active epochs")
             
             # Check recent entries in data_stream for recently active epochs
@@ -158,12 +162,12 @@ class MetricsAgent:
                         epoch_str = fields[b'epoch'].decode()
                         if epoch_str.isdigit():
                             active_epochs.add(int(epoch_str))
-            except (ConnectionError, TimeoutError, OSError):
+            except REDIS_ERRORS:
                 self.logger.debug("Could not read data_stream for active epochs")
             
             return sorted(list(active_epochs))
             
-        except (ConnectionError, TimeoutError, OSError):
+        except REDIS_ERRORS:
             self.logger.warning("Failed to collect active epochs")
             return []
 
@@ -171,7 +175,7 @@ class MetricsAgent:
         """Collect system load with safe default."""
         try:
             return psutil.getloadavg()[0] if hasattr(psutil, "getloadavg") else 0.0
-        except (OSError, AttributeError):
+        except SYSTEM_ERRORS:
             return 0.0
 
     def _calculate_blocks_per_second(self, data_stream_len: int | None, now: float) -> float:
