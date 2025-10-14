@@ -22,6 +22,9 @@ class ConnectionManager:
     Simple, efficient connection manager for Ogmios WebSocket connections.
     
     Uses singleton pattern to ensure single instance across all tasks/workers.
+    Loop-aware design ensures connections work correctly across different
+    asyncio event loops in multi-worker environments like Dask/Prefect.
+    
     Priority logic:
     1. Direct connection via OGMIOS_HOST/OGMIOS_PORT (if both provided)
     2. Round-robin selection from configured endpoints list (fallback)
@@ -45,7 +48,8 @@ class ConnectionManager:
             return
             
         self._initialized = True
-        self._connection: ClientConnection | None = None
+        # Store connections per event loop to avoid cross-loop issues
+        self._connections: dict[asyncio.AbstractEventLoop, ClientConnection | None] = {}
         self._connection_url: str | None = None
         self._endpoint_index: int = 0  # Simple counter for round-robin
         self._available_endpoints: list[str] = []
@@ -110,26 +114,33 @@ class ConnectionManager:
     
     async def get_connection(self) -> ClientConnection:
         """
-        Get active WebSocket connection, creating new one if needed.
+        Get active WebSocket connection for current event loop.
         
         Thread-safe operation with automatic reconnection on failure.
+        Each asyncio event loop gets its own connection to avoid cross-loop issues.
         
         Returns:
-            ClientConnection: Active WebSocket connection
+            ClientConnection: Active WebSocket connection for current loop
             
         Raises:
             ConnectionError: If connection cannot be established
         """
+        # Get current event loop to isolate connections per loop
+        current_loop = asyncio.get_running_loop()
+        
         lock = await self.get_lock()
         async with lock:
-            # Check if existing connection is still valid
-            if (self._connection and 
-                hasattr(self._connection, 'state') and 
-                self._connection.state == State.OPEN):
-                return self._connection
+            # Check if existing connection for this loop is still valid
+            existing_connection = self._connections.get(current_loop)
+            if (existing_connection and 
+                hasattr(existing_connection, 'state') and 
+                existing_connection.state == State.OPEN):
+                return existing_connection
             
-            # Create new connection
-            return await self._create_connection()
+            # Create new connection for this loop
+            new_connection = await self._create_connection()
+            self._connections[current_loop] = new_connection
+            return new_connection
     
     async def _create_connection(self) -> ClientConnection:
         """
@@ -160,7 +171,7 @@ class ConnectionManager:
                     logger.debug("Connecting to %s (attempt %d/%d)", 
                                endpoint_url, attempt + 1, max_retries)
                     
-                    self._connection = await connect(endpoint_url)
+                    connection = await connect(endpoint_url)
                     
                     # Update current URL if we succeeded with a different endpoint
                     if endpoint_url != self._connection_url:
@@ -172,7 +183,7 @@ class ConnectionManager:
                     else:
                         logger.info("✅ Connected to %s", endpoint_url)
                     
-                    return self._connection
+                    return connection
                     
                 except Exception as e:
                     last_error = e
@@ -188,15 +199,34 @@ class ConnectionManager:
         raise ConnectionError(f"Cannot connect to any endpoint. Last error: {last_error}") from last_error
     
     async def close(self) -> None:
-        """Close active connection if exists."""
-        if self._connection:
-            try:
-                await self._connection.close()
-                logger.info("🔌 Connection closed")
-            except Exception as e:
-                logger.warning("Error closing connection: %s", e)
-            finally:
-                self._connection = None
+        """Close all active connections across all event loops."""
+        lock = await self.get_lock()
+        async with lock:
+            for loop, connection in list(self._connections.items()):
+                if connection:
+                    try:
+                        await connection.close()
+                        logger.info("🔌 Connection closed for loop %s", id(loop))
+                    except Exception as e:
+                        logger.warning("Error closing connection for loop %s: %s", id(loop), e)
+            
+            # Clear all connections
+            self._connections.clear()
+    
+    async def close_current_loop(self) -> None:
+        """Close connection for current event loop only."""
+        current_loop = asyncio.get_running_loop()
+        lock = await self.get_lock()
+        async with lock:
+            connection = self._connections.get(current_loop)
+            if connection:
+                try:
+                    await connection.close()
+                    logger.info("🔌 Connection closed for current loop")
+                except Exception as e:
+                    logger.warning("Error closing connection for current loop: %s", e)
+                finally:
+                    del self._connections[current_loop]
     
     async def __aenter__(self) -> "ConnectionManager":
         """Async context manager entry."""
