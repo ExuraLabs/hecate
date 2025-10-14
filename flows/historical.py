@@ -47,6 +47,7 @@ def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
 )
 async def sync_epoch(
     epoch: EpochNumber,
+    scout: EndpointScout,
     batch_size: int = 1000,
 ) -> EpochNumber:
     """
@@ -56,6 +57,8 @@ async def sync_epoch(
     
     :param epoch: The epoch number to synchronize
     :type epoch: EpochNumber
+    :param scout: Shared EndpointScout instance from flow level for connection management
+    :type scout: EndpointScout
     :param batch_size: Number of blocks to process per batch. Default 1000 when called directly,
      typically matches BASE_BATCH_SIZE from settings (1000 in production).
     :type batch_size: int
@@ -69,24 +72,24 @@ async def sync_epoch(
     # Apply performance optimization for Block initialization
     Block.__init__ = fast_block_init
 
-    async with EndpointScout() as scout:
-        connection = await scout.get_best_connection()
-        
-        async with (HistoricalRedisSink() as sink, HecateClient(connection) as client):
-            last_height = await _stream_and_batch_blocks(
-                client, sink, epoch, batch_size, logger
-            )
+    # Use the shared scout instance passed from flow level
+    connection = await scout.get_best_connection()
+    
+    async with (HistoricalRedisSink() as sink, HecateClient(connection) as client):
+        last_height = await _stream_and_batch_blocks(
+            client, sink, epoch, batch_size, logger
+        )
 
-            if last_height is None:
-                logger.warning("No blocks processed for epoch %s, cannot mark complete.", epoch)
-                return epoch
-                
-            await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
-            logger.info("✅ Epoch %s completed", epoch)
+        if last_height is None:
+            logger.warning("No blocks processed for epoch %s, cannot mark complete.", epoch)
+            return epoch
+            
+        await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
+        logger.info("✅ Epoch %s completed", epoch)
 
-        epoch_end = time.perf_counter()
-        logger.info("✅ Epoch %s sync complete in %.2fs", epoch, epoch_end - epoch_start)
-        return epoch
+    epoch_end = time.perf_counter()
+    logger.info("✅ Epoch %s sync complete in %.2fs", epoch, epoch_end - epoch_start)
+    return epoch
 
 
 async def _stream_and_batch_blocks(
@@ -239,24 +242,30 @@ async def historical_sync_flow(
             total_epochs, final_concurrent_epochs
         )
 
-        # Process epochs in batches
-        for batch_start_index in range(0, total_epochs, final_concurrent_epochs):
-            try:
-                await process_batch(
-                    total_epochs,
-                    final_concurrent_epochs,
-                    batch_start_index,
-                    epochs,
-                    final_batch_size,
-                    metrics_agent
-                )
-            except COMMON_ERRORS as e:
-                logger.error(
-                    "Failed to process batch starting at index %d: %s",
-                    batch_start_index, e
-                )
-                # Continue with next batch rather than failing completely
-                continue
+        # Create a single EndpointScout instance for the entire flow
+        # This prevents network polling overhead in every task
+        async with EndpointScout() as scout:
+            logger.info("🔍 Initialized shared EndpointScout for %d tasks", total_epochs)
+            
+            # Process epochs in batches
+            for batch_start_index in range(0, total_epochs, final_concurrent_epochs):
+                try:
+                    await process_batch(
+                        total_epochs,
+                        final_concurrent_epochs,
+                        batch_start_index,
+                        epochs,
+                        final_batch_size,
+                        metrics_agent,
+                        scout  # Pass the shared scout instance
+                    )
+                except COMMON_ERRORS as e:
+                    logger.error(
+                        "Failed to process batch starting at index %d: %s",
+                        batch_start_index, e
+                    )
+                    # Continue with next batch rather than failing completely
+                    continue
 
         flow_end = time.perf_counter()
         logger.info("🏁 Historical sync complete in %.2fs", flow_end - flow_start)
@@ -280,6 +289,7 @@ async def process_batch(
     epochs: list[EpochNumber],
     batch_size: int,
     metrics_agent: MetricsAgent,
+    scout: EndpointScout,
 ) -> None:
     """
     Process a batch of epochs concurrently using sync_epoch tasks.
@@ -295,9 +305,7 @@ async def process_batch(
         epochs: Complete list of epochs to process
         batch_size: Number of blocks to process per epoch batch
         metrics_agent: Singleton metrics agent instance for state persistence
-        
-    Note:
-        The scout parameter is commented out but would be used for connection management
+        scout: Shared EndpointScout instance from flow level for connection management
     """
     logger = get_run_logger()
     batch_start_time = time.perf_counter()
@@ -321,6 +329,7 @@ async def process_batch(
 
     futures = sync_epoch.map(
         epoch=batch_epochs,
+        scout=scout,
         batch_size=batch_size
     )
     wait(futures)
