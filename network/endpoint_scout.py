@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+import random
 from typing import Protocol
 from dataclasses import dataclass
 from websockets import ClientConnection, connect, ConnectionClosed
@@ -78,7 +79,6 @@ class WeightedLatencyPolicy:
         self, candidates: list[tuple[WebsocketUrl, ConnectionMetrics]]
     ) -> WebsocketUrl:
         """Select endpoint using weighted random based on latency."""
-        import random
 
         acceptable = [
             (url, metrics)
@@ -290,19 +290,18 @@ class EndpointScout:
                     )
                     success = True
                     break
-                except (ConnectionClosed, asyncio.TimeoutError, OSError) as e:
-                    last_error = e
+                except (ConnectionClosed, asyncio.TimeoutError, OSError) as last_error:
                     if attempt < 2:
                         logger.debug(
                             "Connection attempt %d failed for %s: %s, retrying...",
                             attempt + 1,
                             url,
-                            e,
+                            last_error,
                         )
                         await asyncio.sleep(0.5)
                     else:
                         logger.warning(
-                            "All 3 connection attempts failed for %s: %s", url, e
+                            "All 3 connection attempts failed for %s: %s", url, last_error
                         )
 
             if not success and last_error:
