@@ -3,6 +3,7 @@ import time
 from typing import Any
 
 from ogmios import Block
+import ogmios.model.model_map as mm
 from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
 from prefect.futures import wait
@@ -20,6 +21,22 @@ from sinks.redis import HistoricalRedisSink
 
 COMMON_ERRORS = (ConnectionError, TimeoutError, RuntimeError, OSError,
                  asyncio.TimeoutError)
+
+
+def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
+    """
+    Fast initialization for Block objects that bypasses Pydantic validation.
+
+    This optimized initialization directly assigns attributes from kwargs
+    without constructing or validating Pydantic models. It's designed for
+    processing historical blocks where validation is redundant.
+    """
+    self.blocktype = blocktype
+    # Directly assign all attributes without creating _schematype
+    for key, value in kwargs.items():
+        setattr(self, key, value)
+    # Set a dummy _schematype attribute to avoid attribute errors
+    self._schematype = None
 
 
 @task(
@@ -48,6 +65,9 @@ async def sync_epoch(
     logger = get_run_logger()
     epoch_start = time.perf_counter()
     logger.debug("▶️  Starting sync for epoch %s", epoch)
+
+    # Apply performance optimization for Block initialization
+    Block.__init__ = fast_block_init
 
     async with EndpointScout() as scout:
         connection = await scout.get_best_connection()
