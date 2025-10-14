@@ -53,11 +53,11 @@ class AdaptiveMemoryController:
 
     def __init__(self, config: MemoryConfig | None = None):
         # Only initialize once, even if __init__ is called multiple times
-        if self._initialized:
+        if self.__class__._initialized:
             return
             
-        with self._lock:
-            if self._initialized:
+        with self.__class__._lock:
+            if self.__class__._initialized:
                 return
                 
             if config is None:
@@ -83,8 +83,13 @@ class AdaptiveMemoryController:
             )
 
             self.logger = get_contextual_logger()
+            
+            # Mark as initialized FIRST (class variable, not instance)
+            self.__class__._initialized = True
+            
+            # Log initialization message only once (when actually initializing)
             self.logger.info(
-                "AdaptiveMemoryController initialized as singleton with limit: %.2f GB",
+                "AdaptiveMemoryController initialized with limit: %.2f GB",
                 self.config.memory_limit_gb
             )
             self.logger.debug(
@@ -102,9 +107,6 @@ class AdaptiveMemoryController:
                 config.memory_limit_gb * config.emergency_threshold, 
                 config.emergency_threshold * 100
             )
-            
-            # Mark as initialized
-            self._initialized = True
 
     @classmethod
     def reset_singleton(cls) -> None:
