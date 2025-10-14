@@ -25,23 +25,23 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
     Inherits from OgmiosClient for type compatibility but implements
     its own async connection management as well as additional, higher-level methods.
 
-    :param connection: An existing WebSocket connection to use. If None, will create a new connection.
     :param host: Hostname for new connections. Uses settings if not provided.
     :param port: Port for new connections. Default 1337.
     :param path: WebSocket path. Default empty string.
     :param secure: Use WSS instead of WS. Default False.
     :param rpc_version: The JSON-RPC version to use.
+    :param connection: An existing WebSocket connection to use. If None, will create a new connection.
     """
 
     # noinspection PyMissingConstructor
     def __init__(
         self,
-        connection: ClientConnection | None = None,
         host: str | None = None,
         port: int = 1337,
         path: str = "",
         secure: bool = False,
         rpc_version: Jsonrpc = Jsonrpc.field_2_0,
+        connection: ClientConnection | None = None,
     ) -> None:
         self.rpc_version = rpc_version
         self.connection = connection
