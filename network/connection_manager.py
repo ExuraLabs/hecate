@@ -48,7 +48,6 @@ class ConnectionManager:
         # Store connections per event loop to avoid cross-loop issues
         self._connections: dict[asyncio.AbstractEventLoop, ClientConnection | None] = {}
         self._connection_url: str | None = None
-        self._endpoint_index: int = 0  # Simple counter for round-robin
         self._available_endpoints: list[str] = []
         
         # Determine connection strategy at initialization
@@ -89,25 +88,6 @@ class ConnectionManager:
         self._connection_url = "ws://localhost:1337"
         self._available_endpoints = []
         logger.warning("⚠️  No configuration found, using default: %s", self._connection_url)
-    
-    def _get_next_endpoint(self) -> str:
-        """
-        Get next endpoint URL using simple round-robin.
-        
-        Returns:
-            str: Next WebSocket URL to try
-        """
-        # If no rotation (direct mode or single endpoint), return current URL
-        if len(self._available_endpoints) <= 1:
-            return self._connection_url or "ws://localhost:1337"
-        
-        # Round-robin through available endpoints
-        self._endpoint_index = (self._endpoint_index + 1) % len(self._available_endpoints)
-        next_url = self._available_endpoints[self._endpoint_index]
-        
-        logger.debug("🔄 Round-robin selecting endpoint %d/%d: %s", 
-                    self._endpoint_index + 1, len(self._available_endpoints), next_url)
-        return next_url
     
     async def get_connection(self) -> ClientConnection:
         """
@@ -169,17 +149,13 @@ class ConnectionManager:
                     
                     connection = await connect(endpoint_url)
                     
-                    # Update current URL if we succeeded with a different endpoint
+                    # Log successful connection (don't update global state to avoid race conditions)
                     if endpoint_url != self._connection_url:
-                        self._connection_url = endpoint_url
-                        # Update index to match the successful endpoint
-                        if endpoint_url in self._available_endpoints:
-                            self._endpoint_index = self._available_endpoints.index(endpoint_url)
-                        logger.info("✅ Switched to endpoint: %s", endpoint_url)
+                        logger.info("✅ Connected to fallback endpoint: %s", endpoint_url)
                     else:
-                        logger.info("✅ Connected to %s", endpoint_url)
+                        logger.info("✅ Connected to primary endpoint: %s", endpoint_url)
                     
-                    return self._connection
+                    return connection
                     
                 except Exception as e:
                     last_error = e
