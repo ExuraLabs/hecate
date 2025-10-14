@@ -22,9 +22,6 @@ class ConnectionManager:
     Simple, efficient connection manager for Ogmios WebSocket connections.
     
     Uses singleton pattern to ensure single instance across all tasks/workers.
-    Loop-aware design ensures connections work correctly across different
-    asyncio event loops in multi-worker environments like Dask/Prefect.
-    
     Priority logic:
     1. Direct connection via OGMIOS_HOST/OGMIOS_PORT (if both provided)
     2. Round-robin selection from configured endpoints list (fallback)
@@ -117,10 +114,9 @@ class ConnectionManager:
         Get active WebSocket connection for current event loop.
         
         Thread-safe operation with automatic reconnection on failure.
-        Each asyncio event loop gets its own connection to avoid cross-loop issues.
         
         Returns:
-            ClientConnection: Active WebSocket connection for current loop
+            ClientConnection: Active WebSocket connection
             
         Raises:
             ConnectionError: If connection cannot be established
@@ -183,7 +179,7 @@ class ConnectionManager:
                     else:
                         logger.info("✅ Connected to %s", endpoint_url)
                     
-                    return connection
+                    return self._connection
                     
                 except Exception as e:
                     last_error = e
