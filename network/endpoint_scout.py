@@ -85,11 +85,7 @@ class WeightedLatencyPolicy:
             for url, metrics in candidates
             if metrics.latency_ms is None
             or metrics.latency_ms < self.latency_threshold_ms
-        ]
-
-        if not acceptable:
-            # If all have high latency, use best available
-            acceptable = candidates
+        ] or candidates  # If all have high latency, use best available
 
         weights = []
         urls = []
