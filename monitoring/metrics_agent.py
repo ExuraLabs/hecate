@@ -23,7 +23,7 @@ class SystemMetrics:
     memory_used_gb: float
     memory_used_percent: float
     redis_stream_depths: dict[str, int]
-    active_epochs: list[int]
+    activity_indicators: dict[str, int]
     blocks_per_second: float
     system_load: float
 
@@ -78,8 +78,7 @@ class MetricsAgent:
         
         # Collect each metric type independently with safe defaults
         memory_used_gb, memory_used_percent = self._collect_memory_metrics()
-        stream_depths, data_stream_len = await self._collect_redis_stream_metrics()
-        active_epochs = await self._collect_active_epochs()
+        stream_depths, data_stream_len, activity_indicators = await self._collect_redis_stream_metrics()
         system_load = self._collect_system_load()
         blocks_per_second = self._calculate_blocks_per_second(data_stream_len, now)
 
@@ -88,7 +87,7 @@ class MetricsAgent:
             memory_used_gb=memory_used_gb,
             memory_used_percent=memory_used_percent,
             redis_stream_depths=stream_depths,
-            active_epochs=active_epochs,
+            activity_indicators=activity_indicators,
             blocks_per_second=blocks_per_second,
             system_load=system_load,
         )
@@ -102,12 +101,20 @@ class MetricsAgent:
             self.logger.warning("Failed to collect memory metrics, using defaults")
             return 0.0, 0.0
 
-    async def _collect_redis_stream_metrics(self) -> tuple[dict[str, int], int | None]:
-        """Collect Redis stream metrics with safe defaults."""
+    async def _collect_redis_stream_metrics(self) -> tuple[dict[str, int], int | None, dict[str, int]]:
+        """
+        Collect Redis stream metrics AND activity data with safe defaults.
+        
+        Returns stream depths, data stream length, and activity indicators
+        in a single efficient call to minimize Redis queries.
+        """
         if not self.redis_client:
-            return {}, None
+            empty_activity = {"epochs_in_progress": 0, "epochs_ready_to_commit": 0, "total_active_work": 0}
+            return {}, None, empty_activity
             
         stream_depths = {}
+        
+        # Get stream lengths
         for stream in ["hecate:history:data_stream", "hecate:history:event_stream"]:
             try:
                 stream_depths[stream] = await self.redis_client.xlen(stream)
@@ -115,61 +122,42 @@ class MetricsAgent:
                 self.logger.warning("Failed to get length for stream %s", stream)
                 stream_depths[stream] = 0
         
-        return stream_depths, stream_depths.get("hecate:history:data_stream")
-
-    async def _collect_active_epochs(self) -> list[int]:
-        """
-        Collect active epochs with safe defaults.
-        
-        Looks for epochs that are currently being processed by checking:
-        1. resume_map: epochs with active resume positions
-        2. ready_set: epochs completed but awaiting sequential commit
-        3. recent data_stream entries: epochs that have sent batches recently
-        """
-        if not self.redis_client:
-            return []
-            
+        # Get activity data in the same call batch
         try:
-            active_epochs = set()
-            
-            # Check resume_map for epochs with active resume positions
             resume_map_data = await self.redis_client.hgetall("hecate:history:resume_map")
-            for epoch_bytes in resume_map_data.keys():
-                epoch_str = epoch_bytes.decode() if isinstance(epoch_bytes, bytes) else str(epoch_bytes)
-                if epoch_str.isdigit():
-                    active_epochs.add(int(epoch_str))
-                else:
-                    self.logger.warning("Invalid epoch key in resume_map: %s", epoch_str)
-            
-            # Check ready_set for epochs awaiting sequential commit
-            try:
-                ready_set_data = await self.redis_client.smembers("hecate:history:ready_set")
-                for epoch_bytes in ready_set_data:
-                    epoch_str = epoch_bytes.decode() if isinstance(epoch_bytes, bytes) else str(epoch_bytes)
-                    if epoch_str.isdigit():
-                        active_epochs.add(int(epoch_str))
-            except REDIS_ERRORS:
-                self.logger.debug("Could not read ready_set for active epochs")
-            
-            # Check recent entries in data_stream for recently active epochs
-            try:
-                recent_entries = await self.redis_client.xrevrange(
-                    "hecate:history:data_stream", 
-                    count=50  # Look at last 50 entries
-                )
-                for entry_id, fields in recent_entries:
-                    if b'epoch' in fields:
-                        epoch_str = fields[b'epoch'].decode()
-                        if epoch_str.isdigit():
-                            active_epochs.add(int(epoch_str))
-            except REDIS_ERRORS:
-                self.logger.debug("Could not read data_stream for active epochs")
-            
-            return sorted(list(active_epochs))
-            
+            ready_set_data = await self.redis_client.smembers("hecate:history:ready_set")
+            activity_indicators = await self._collect_activity_indicators(resume_map_data, ready_set_data)
         except REDIS_ERRORS:
-            self.logger.warning("Failed to collect active epochs")
-            return []
+            self.logger.debug("Failed to collect activity indicators, using defaults")
+            activity_indicators = {"epochs_in_progress": 0, "epochs_ready_to_commit": 0, "total_active_work": 0}
+        
+        return stream_depths, stream_depths.get("hecate:history:data_stream"), activity_indicators
+
+    async def _collect_activity_indicators(self, resume_map_data: dict[bytes, bytes], ready_set_data: set[bytes]) -> dict[str, int]:
+        """
+        Efficient activity indicators using data already collected in stream metrics.
+        
+        Args:
+            resume_map_data: Resume map data from stream metrics collection
+            ready_set_data: Ready set data from stream metrics collection
+        """
+        try:
+            epochs_in_progress = len(resume_map_data)
+            epochs_ready_to_commit = len(ready_set_data)
+            total_active_work = epochs_in_progress + epochs_ready_to_commit
+            
+            return {
+                "epochs_in_progress": epochs_in_progress,           # Currently being processed
+                "epochs_ready_to_commit": epochs_ready_to_commit,   # Completed, awaiting commit
+                "total_active_work": total_active_work,             # Overall activity level
+            }
+        except (TypeError, ValueError, AttributeError):
+            # Safe fallback - return zero activity
+            return {
+                "epochs_in_progress": 0,
+                "epochs_ready_to_commit": 0,
+                "total_active_work": 0,
+            }
 
     def _collect_system_load(self) -> float:
         """Collect system load with safe default."""
@@ -236,15 +224,17 @@ async def collect_and_publish_metrics(agent: MetricsAgent | None = None) -> None
         async with redis.from_url(get_redis_settings().url) as redis_client:
             agent.redis_client = redis_client
             metrics = await agent.collect_system_metrics()
-            active_epochs_str = f"[{', '.join(map(str, metrics.active_epochs))}]" if metrics.active_epochs else "[]"
+            activity_str = f"Work: {metrics.activity_indicators['total_active_work']} " \
+                          f"(Progress: {metrics.activity_indicators['epochs_in_progress']}, " \
+                          f"Ready: {metrics.activity_indicators['epochs_ready_to_commit']})"
             logger.info(
                 "System Metrics | Memory: %.2fGB (%.1f%%) | System Load: %.2f | "
-                "Streams: %s | Active Epochs: %s | Blocks/sec: %.2f",
+                "Streams: %s | Activity: %s | Blocks/sec: %.2f",
                 metrics.memory_used_gb,
                 metrics.memory_used_percent,
                 metrics.system_load,
                 metrics.redis_stream_depths,
-                active_epochs_str,
+                activity_str,
                 metrics.blocks_per_second
             )
             await _publish_metrics_to_redis(redis_client, metrics)
@@ -266,12 +256,8 @@ async def _publish_metrics_to_redis(redis_client: redis.Redis, metrics: SystemMe
         "memory_percent": metrics.memory_used_percent,
         "system_load": metrics.system_load,
         "blocks_per_second": metrics.blocks_per_second,
-        "active_epochs_count": len(metrics.active_epochs),
         **{f"redis_{k}": v for k, v in metrics.redis_stream_depths.items()},
+        **{f"activity_{k}": v for k, v in metrics.activity_indicators.items()},
     }
-    
-    # Add individual active epochs (up to a reasonable limit)
-    for i, epoch in enumerate(metrics.active_epochs[:10]):
-        stream_data[f"active_epoch_{i}"] = epoch
     
     await redis_client.xadd("hecate:metrics:system", stream_data)
