@@ -15,7 +15,6 @@ from constants import FIRST_SHELLEY_EPOCH
 from flows import get_system_checkpoint
 from models import BlockHeight, EpochNumber
 from monitoring.metrics_agent import collect_and_publish_metrics, MetricsAgent
-from network.endpoint_scout import EndpointScout
 from sinks.redis import HistoricalRedisSink
 
 
@@ -47,7 +46,6 @@ def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
 )
 async def sync_epoch(
     epoch: EpochNumber,
-    scout: EndpointScout,
     batch_size: int = 1000,
 ) -> EpochNumber:
     """
@@ -57,8 +55,6 @@ async def sync_epoch(
     
     :param epoch: The epoch number to synchronize
     :type epoch: EpochNumber
-    :param scout: Shared EndpointScout instance from flow level for connection management
-    :type scout: EndpointScout
     :param batch_size: Number of blocks to process per batch. Default 1000 when called directly,
      typically matches BASE_BATCH_SIZE from settings (1000 in production).
     :type batch_size: int
@@ -71,11 +67,9 @@ async def sync_epoch(
 
     # Apply performance optimization for Block initialization
     Block.__init__ = fast_block_init
-
-    # Use the shared scout instance passed from flow level
-    connection = await scout.get_best_connection()
     
-    async with (HistoricalRedisSink() as sink, HecateClient(connection) as client):
+    # Use HecateClient with ConnectionManager (no connection parameter = use manager)
+    async with (HistoricalRedisSink() as sink, HecateClient() as client):
         last_height = await _stream_and_batch_blocks(
             client, sink, epoch, batch_size, logger
         )
@@ -242,30 +236,28 @@ async def historical_sync_flow(
             total_epochs, final_concurrent_epochs
         )
 
-        # Create a single EndpointScout instance for the entire flow
-        # This prevents network polling overhead in every task
-        async with EndpointScout() as scout:
-            logger.info("🔍 Initialized shared EndpointScout for %d tasks", total_epochs)
-            
-            # Process epochs in batches
-            for batch_start_index in range(0, total_epochs, final_concurrent_epochs):
-                try:
-                    await process_batch(
-                        total_epochs,
-                        final_concurrent_epochs,
-                        batch_start_index,
-                        epochs,
-                        final_batch_size,
-                        metrics_agent,
-                        scout  # Pass the shared scout instance
-                    )
-                except COMMON_ERRORS as e:
-                    logger.error(
-                        "Failed to process batch starting at index %d: %s",
-                        batch_start_index, e
-                    )
-                    # Continue with next batch rather than failing completely
-                    continue
+        # Process epochs in batches using singleton ConnectionManager
+        # The shared manager prevents connection overhead across all tasks
+        logger.info("🔍 Using singleton ConnectionManager for %d tasks", total_epochs)
+        
+        # Process epochs in batches
+        for batch_start_index in range(0, total_epochs, final_concurrent_epochs):
+            try:
+                await process_batch(
+                    total_epochs,
+                    final_concurrent_epochs,
+                    batch_start_index,
+                    epochs,
+                    final_batch_size,
+                    metrics_agent,
+                )
+            except COMMON_ERRORS as e:
+                logger.error(
+                    "Failed to process batch starting at index %d: %s",
+                    batch_start_index, e
+                )
+                # Continue with next batch rather than failing completely
+                continue
 
         flow_end = time.perf_counter()
         logger.info("🏁 Historical sync complete in %.2fs", flow_end - flow_start)
@@ -289,7 +281,6 @@ async def process_batch(
     epochs: list[EpochNumber],
     batch_size: int,
     metrics_agent: MetricsAgent,
-    scout: EndpointScout,
 ) -> None:
     """
     Process a batch of epochs concurrently using sync_epoch tasks.
@@ -305,7 +296,6 @@ async def process_batch(
         epochs: Complete list of epochs to process
         batch_size: Number of blocks to process per epoch batch
         metrics_agent: Singleton metrics agent instance for state persistence
-        scout: Shared EndpointScout instance from flow level for connection management
     """
     logger = get_run_logger()
     batch_start_time = time.perf_counter()
@@ -329,7 +319,6 @@ async def process_batch(
 
     futures = sync_epoch.map(
         epoch=batch_epochs,
-        scout=scout,
         batch_size=batch_size
     )
     wait(futures)

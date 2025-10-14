@@ -1,19 +1,11 @@
 import json
 from functools import lru_cache
-from typing import TypedDict
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 env_file = ".env.production"  # ".env.production"
-
-
-class OgmiosEndpointConfig(TypedDict):
-    """Type definition for Ogmios endpoint configuration."""
-
-    url: str
-    weight: float
 
 
 class DaskSettings(BaseSettings):
@@ -64,14 +56,14 @@ class BatchSettings(BaseSettings):
 
 
 class OgmiosSettings(BaseSettings):
-    """Ogmios multi-source balancer settings."""
+    """Ogmios connection settings."""
 
     model_config = SettingsConfigDict(
         env_file=env_file, env_file_encoding="utf-8", extra="ignore"
     )
     endpoints_str: str = Field(
         alias="OGMIOS_ENDPOINTS",
-        default='[{"url": "ws://localhost:1337", "weight": 1.0}]',
+        default='["ws://localhost:1337"]',
     )
 
     # Direct connection settings
@@ -79,16 +71,14 @@ class OgmiosSettings(BaseSettings):
     ogmios_port: str | None = Field(alias="OGMIOS_PORT", default=None)
 
     @property
-    def endpoints(self) -> list[OgmiosEndpointConfig]:
+    def endpoints(self) -> list[str]:
         """
-        Parse the JSON string and return a list of endpoint configurations.
+        Parse the JSON string and return a list of endpoint URLs.
 
         Returns:
-            list[OgmiosEndpointConfig]: List of endpoint configurations with
-                url (str) and weight (float) fields.
+            list[str]: List of WebSocket URLs as simple strings.
         """
-        parsed_endpoints: list[OgmiosEndpointConfig] = json.loads(self.endpoints_str)
-        return parsed_endpoints
+        return json.loads(self.endpoints_str)
 
 
 @lru_cache

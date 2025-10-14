@@ -13,6 +13,7 @@ from client.ledgerstate import AsyncEpoch, AsyncEraSummaries, AsyncTip
 from config.settings import get_ogmios_settings
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
 from models import EpochNumber
+from network.connection_manager import get_connection_manager
 
 logger = logging.getLogger(__name__)
 
@@ -25,23 +26,23 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
     Inherits from OgmiosClient for type compatibility but implements
     its own async connection management as well as additional, higher-level methods.
 
-    :param host: Hostname for new connections. Uses settings if not provided.
-    :param port: Port for new connections. Default 1337.
-    :param path: WebSocket path. Default empty string.
-    :param secure: Use WSS instead of WS. Default False.
+    :param connection: An existing WebSocket connection to use. If None, will use ConnectionManager.
+    :param host: In case of provided, the host to connect to.
+    :param port: In case of provided, the port to connect to.
+    :param path: In case of provided, the path to connect to.
+    :param secure: In case of provided, whether to use a secure connection.
     :param rpc_version: The JSON-RPC version to use.
-    :param connection: An existing WebSocket connection to use. If None, will create a new connection.
     """
 
     # noinspection PyMissingConstructor
     def __init__(
         self,
+        connection: ClientConnection | None = None,
         host: str | None = None,
         port: int = 1337,
         path: str = "",
         secure: bool = False,
         rpc_version: Jsonrpc = Jsonrpc.field_2_0,
-        connection: ClientConnection | None = None,
     ) -> None:
         self.rpc_version = rpc_version
         self.connection = connection
@@ -51,6 +52,9 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         self.port = port
         self.path = path
         self.secure = secure
+        
+        # Use ConnectionManager when no connection provided
+        self._use_connection_manager = connection is None
 
         # chainsync methods
         self.find_intersection = AsyncFindIntersection(self)
@@ -77,7 +81,22 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         path: str = "",
         secure: bool = False,
     ) -> str:
-        """Build connection URL with the given parameters."""
+        """
+        Build connection URL with the given parameters (legacy mode only).
+        
+        This method is only used when HecateClient is instantiated with explicit
+        connection parameters for backward compatibility. For normal usage,
+        ConnectionManager handles URL selection automatically.
+        
+        Args:
+            host: Hostname to connect to
+            port: Port number to connect to  
+            path: WebSocket path
+            secure: Whether to use WSS instead of WS
+            
+        Returns:
+            str: Complete WebSocket URL
+        """
         ogmios_settings = get_ogmios_settings()
         
         # Use centralized settings if host not provided
@@ -100,13 +119,26 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
             return  # Already connected, noop
             
         if self.connection is None:
-            connect_str = self.get_connection_url(self.host, self.port, self.path, self.secure)
-            self.connection = await connect(connect_str, **connection_params)
+            if self._use_connection_manager:
+                # Use the singleton connection manager for optimal performance
+                manager = get_connection_manager()
+                self.connection = await manager.get_connection()
+                logger.debug("Using connection from ConnectionManager")
+            else:
+                connect_str = self.get_connection_url(self.host, self.port, self.path, self.secure)
+                self.connection = await connect(connect_str, **connection_params)
+                logger.debug("Using legacy direct connection to %s", connect_str)
 
     async def close(self) -> None:
         """Close the connection"""
         if self.connection is not None:
-            await self.connection.close()
+            if not self._use_connection_manager:
+                # Only close if we created the connection directly (legacy mode)
+                await self.connection.close()
+                logger.debug("Closed legacy direct connection")
+            else:
+                # Don't close managed connections - let ConnectionManager handle it
+                logger.debug("Released managed connection (not closed)")
             self.connection = None
 
     async def send(self, request: str) -> None:
