@@ -235,10 +235,6 @@ async def historical_sync_flow(
             "Processing %d epochs in batches of %d",
             total_epochs, final_concurrent_epochs
         )
-
-        # Process epochs in batches using singleton ConnectionManager
-        # The shared manager prevents connection overhead across all tasks
-        logger.info("🔍 Using singleton ConnectionManager for %d tasks", total_epochs)
         
         # Process epochs in batches
         for batch_start_index in range(0, total_epochs, final_concurrent_epochs):
