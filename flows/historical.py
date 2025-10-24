@@ -7,10 +7,10 @@ import ogmios.model.model_map as mm
 from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
 from prefect.futures import wait
-from prefect_dask import DaskTaskRunner  # type: ignore[attr-defined]
+# from prefect_dask import DaskTaskRunner  # type: ignore[attr-defined]  # Comentado para usar ConcurrentTaskRunner por defecto
 
 from client import HecateClient
-from config.settings import get_batch_settings, get_dask_settings
+from config.settings import get_batch_settings  # , get_dask_settings  # Comentado: ya no usamos Dask
 from constants import FIRST_SHELLEY_EPOCH
 from flows import get_system_checkpoint
 from models import BlockHeight, EpochNumber
@@ -68,8 +68,8 @@ async def sync_epoch(
     # Apply performance optimization for Block initialization
     Block.__init__ = fast_block_init
     
-    # Use HecateClient with ConnectionManager (no connection parameter = use manager)
-    async with (HistoricalRedisSink() as sink, HecateClient() as client):
+    # Use HecateClient for production: use_managed_connection=True prefiere ConnectionManager
+    async with (HistoricalRedisSink() as sink, HecateClient(use_managed_connection=True) as client):
         last_height = await _stream_and_batch_blocks(
             client, sink, epoch, batch_size, logger
         )
@@ -163,13 +163,13 @@ def _should_skip_block(block: Block, resume_height: BlockHeight | None) -> bool:
 
 @flow(  # type: ignore[arg-type]
     name="Historical Sync",
-    task_runner=DaskTaskRunner(  # type: ignore[arg-type]
-        cluster_kwargs={
-            "n_workers": get_dask_settings().n_workers,
-            "threads_per_worker": 1,
-            "memory_limit": get_dask_settings().worker_memory_limit,
-        },
-    ),
+    # task_runner=DaskTaskRunner(  # type: ignore[arg-type]  # Comentado para usar ConcurrentTaskRunner por defecto
+    #     cluster_kwargs={
+    #         "n_workers": get_dask_settings().n_workers,
+    #         "threads_per_worker": 1,
+    #         "memory_limit": get_dask_settings().worker_memory_limit,
+    #     },
+    # ),
 )
 async def historical_sync_flow(
     *,
@@ -183,9 +183,9 @@ async def historical_sync_flow(
     or starts from the specified starting epoch.
     The synchronization tasks are processed concurrently for improved performance.
 
-    This asynchronous flow uses a Dask-based task runner to handle workloads and ensures
-    data is passed along efficiently using defined batch sizes. The execution time is logged
-    to monitor the performance of the process.
+    This asynchronous flow uses the default ConcurrentTaskRunner (instead of Dask) to handle 
+    workloads and ensures data is passed along efficiently using defined batch sizes. 
+    The execution time is logged to monitor the performance of the process.
 
     :param start_epoch: The starting epoch for synchronization. Defaults to FIRST_SHELLEY_EPOCH.
     :type start_epoch: EpochNumber
@@ -193,7 +193,7 @@ async def historical_sync_flow(
      Defaults to BASE_BATCH_SIZE from settings (typically 1000 in production).
     :type batch_size: int | None
     :param concurrent_epochs: The number of epochs to process concurrently. 
-     Defaults to DASK_N_WORKERS (6) from settings if not provided.
+     Defaults to 6 workers using ConcurrentTaskRunner (previously DASK_N_WORKERS).
     :type concurrent_epochs: int | None
     :return: This flow does not return any value.
     :rtype: None
@@ -208,7 +208,8 @@ async def historical_sync_flow(
         # Load settings from centralized config if not provided explicitly
         batch_settings = get_batch_settings()
         final_batch_size = batch_size or batch_settings.base_size
-        final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers
+        # final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers  # Comentado: ya no usamos Dask
+        final_concurrent_epochs = concurrent_epochs or 6  # Usar ConcurrentTaskRunner por defecto con 6 workers
 
         # Initial metrics collection before starting sync
         logger.info("Collecting initial metrics before historical sync...")
@@ -313,10 +314,15 @@ async def process_batch(
     except COMMON_ERRORS as e:
         logger.warning("Failed to collect metrics for batch %d: %s", batch_number, e)
 
-    futures = sync_epoch.map(
-        epoch=batch_epochs,
-        batch_size=batch_size
-    )
+    # Usar .submit() en lugar de .map() para ConcurrentTaskRunner
+    # futures = sync_epoch.map(  # Comentado: sintaxis para DaskTaskRunner
+    #     epoch=batch_epochs,
+    #     batch_size=batch_size
+    # )
+    futures = [
+        sync_epoch.submit(epoch=epoch, batch_size=batch_size)
+        for epoch in batch_epochs
+    ]
     wait(futures)
 
     batch_end_time = time.perf_counter()

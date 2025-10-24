@@ -17,7 +17,6 @@ async def run_demo() -> None:
 
     try:
         console.print("[bold blue]Connecting to Ogmios...[/]")
-        
         client = HecateClient()
 
         # 1. Get current tip

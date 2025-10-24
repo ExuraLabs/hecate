@@ -1,10 +1,3 @@
-"""
-Simple and efficient connection manager for Ogmios WebSocket connections.
-
-This module provides a clean, singleton-based approach to managing WebSocket
-connections with automatic fallback and minimal overhead.
-"""
-
 import asyncio
 import logging
 from typing import Any, ClassVar
@@ -19,19 +12,12 @@ logger = logging.getLogger(__name__)
 
 class ConnectionManager:
     """
-    Simple, efficient connection manager for Ogmios WebSocket connections.
-    
-    Uses singleton pattern to ensure single instance across all tasks/workers.
-    Priority logic:
-    1. Direct connection via OGMIOS_HOST/OGMIOS_PORT (if both provided)
-    2. Round-robin selection from configured endpoints list (fallback)
-    
-    No complex selection policies, no monitoring overhead, just reliable connections
-    with simple load distribution across available endpoints.
+    Simple, efficient connection manager for Ogmios WebSocket connections.22
     """
     
     _instance: ClassVar["ConnectionManager | None"] = None
     _lock: ClassVar[asyncio.Lock | None] = None
+    _global_endpoint_counter: ClassVar[int] = 0  # Round-robin counter across all instances
     
     def __new__(cls) -> "ConnectionManager":
         """Ensure singleton instance."""
@@ -40,19 +26,26 @@ class ConnectionManager:
         return cls._instance
     
     def __init__(self) -> None:
-        """Initialize connection manager (only once due to singleton)."""
+        """
+        Initialize connection manager
+        
+        Currently stores one connection per event loop for simplicity.
+        Future enhancement: Connection pooling and multiplexing across endpoints.
+        """
         if hasattr(self, '_initialized'):
             return
             
         self._initialized = True
         # Store connections per event loop to avoid cross-loop issues
+        # TODO: Future - expand to connection pool per loop for multiplexing
         self._connections: dict[asyncio.AbstractEventLoop, ClientConnection | None] = {}
         self._connection_url: str | None = None
         self._available_endpoints: list[str] = []
+        self._current_endpoint_index: int = 0
         
         # Determine connection strategy at initialization
         self._setup_connection_strategy()
-        logger.info("🔗 Connection manager initialized for: %s", self._connection_url)
+        logger.info("Connection manager initialized for: %s", self._connection_url)
     
     @classmethod
     async def get_lock(cls) -> asyncio.Lock:
@@ -63,31 +56,27 @@ class ConnectionManager:
     
     def _setup_connection_strategy(self) -> None:
         """
-        Setup connection strategy based on configuration.
+        Setup connection strategy using only endpoints list with round-robin.
         
-        Determines if we use direct connection or round-robin from endpoints list.
+        Future enhancement: This will support multiple connections per endpoint
+        for true multiplexing when that feature is discussed and implemented.
         """
         settings = get_ogmios_settings()
         
-        # Priority 1: Direct host/port (simple mode)
-        if settings.ogmios_host and settings.ogmios_port:
-            self._connection_url = f"ws://{settings.ogmios_host}:{settings.ogmios_port}"
-            self._available_endpoints = []  # Direct mode, no rotation
-            logger.info("🎯 Using direct connection: %s", self._connection_url)
-            return
-        
-        # Priority 2: Round-robin from endpoints list (fallback mode)
+        # Only use endpoints list - remove direct host/port logic
         if settings.endpoints:
-            self._available_endpoints = settings.endpoints  # Ya es lista de strings
-            self._connection_url = self._available_endpoints[0]  # Start with first
-            logger.info("📋 Using round-robin across %d endpoints: %s", 
-                       len(self._available_endpoints), self._available_endpoints)
-            return
-        
-        # Fallback: localhost default
-        self._connection_url = "ws://localhost:1337"
-        self._available_endpoints = []
-        logger.warning("⚠️  No configuration found, using default: %s", self._connection_url)
+            self._available_endpoints = settings.endpoints
+            # Simple round-robin without lock for now
+            # TODO: Make this async lock-based when connection pooling is added
+            ConnectionManager._global_endpoint_counter = (
+                ConnectionManager._global_endpoint_counter + 1
+            ) % len(self._available_endpoints)
+            
+            self._current_endpoint_index = ConnectionManager._global_endpoint_counter
+            self._connection_url = self._available_endpoints[self._current_endpoint_index]
+            logger.info("Using round-robin endpoint %s", self._connection_url)
+        else:
+            raise ConnectionError("No endpoints configured in settings")
     
     async def get_connection(self) -> ClientConnection:
         """
@@ -126,49 +115,60 @@ class ConnectionManager:
             ClientConnection: New WebSocket connection
             
         Raises:
-            ConnectionError: If connection fails after retries
+            ConnectionError: If all endpoints fail
         """
-        if not self._connection_url:
-            raise ConnectionError("No connection URL configured")
+        if not self._available_endpoints:
+            raise ConnectionError("No endpoints configured")
         
-        max_retries = 3
-        last_error = None
+        # Try current endpoint first (sticky behavior)
+        try:
+            logger.debug("Connecting to current endpoint: %s", self._connection_url)
+            connection = await connect(self._connection_url)
+            logger.info("Connected to Ogmios (sticky): %s", self._connection_url)
+            return connection
+            
+        except Exception as e:
+            logger.warning("Current endpoint failed: %s (%s)", self._connection_url, e)
+            
+            # If we have multiple endpoints, try fallback
+            if len(self._available_endpoints) > 1:
+                return await self._try_fallback_endpoints()
+            else:
+                # Only one endpoint, re-raise the error
+                raise ConnectionError(f"Cannot connect to {self._connection_url}: {e}") from e
+    
+    async def _try_fallback_endpoints(self) -> ClientConnection:
+        """
+        Try connecting to fallback endpoints using round-robin rotation.
         
-        # Try current endpoint first, then round-robin if available
-        endpoints_to_try = [self._connection_url]
-        if len(self._available_endpoints) > 1:
-            # Add other endpoints for failover (excluding current)
-            other_endpoints = [ep for ep in self._available_endpoints if ep != self._connection_url]
-            endpoints_to_try.extend(other_endpoints)
+        Returns:
+            ClientConnection: New WebSocket connection
+            
+        Raises:
+            ConnectionError: If all endpoints fail
+        """
+        original_index = self._current_endpoint_index
         
-        for endpoint_url in endpoints_to_try:
-            for attempt in range(max_retries):
-                try:
-                    logger.debug("Connecting to %s (attempt %d/%d)", 
-                               endpoint_url, attempt + 1, max_retries)
-                    
-                    connection = await connect(endpoint_url)
-                    
-                    # Log successful connection (don't update global state to avoid race conditions)
-                    if endpoint_url != self._connection_url:
-                        logger.info("✅ Connected to fallback endpoint: %s", endpoint_url)
-                    else:
-                        logger.info("✅ Connected to primary endpoint: %s", endpoint_url)
-                    
-                    return connection
-                    
-                except Exception as e:
-                    last_error = e
-                    if attempt < max_retries - 1:
-                        logger.debug("Connection attempt %d failed for %s: %s, retrying...", 
-                                   attempt + 1, endpoint_url, e)
-                        await asyncio.sleep(0.5 * (attempt + 1))  # Exponential backoff
-                    else:
-                        logger.warning("All %d attempts failed for %s: %s", 
-                                     max_retries, endpoint_url, e)
+        # Try all other endpoints once
+        for _ in range(len(self._available_endpoints) - 1):
+            # Rotate to next endpoint
+            self._current_endpoint_index = (self._current_endpoint_index + 1) % len(self._available_endpoints)
+            self._connection_url = self._available_endpoints[self._current_endpoint_index]
+            
+            try:
+                logger.debug("Trying fallback endpoint: %s", self._connection_url)
+                connection = await connect(self._connection_url)
+                logger.info("Connected to Ogmios (fallback): %s", self._connection_url)
+                return connection
+                
+            except Exception as e:
+                logger.warning("Fallback endpoint failed: %s (%s)", self._connection_url, e)
+                continue
         
-        # If we get here, all endpoints failed
-        raise ConnectionError(f"Cannot connect to any endpoint. Last error: {last_error}") from last_error
+        # All endpoints failed, restore original index and raise error
+        self._current_endpoint_index = original_index
+        self._connection_url = self._available_endpoints[self._current_endpoint_index]
+        raise ConnectionError(f"Cannot connect to any of {len(self._available_endpoints)} endpoints")
     
     async def close(self) -> None:
         """Close all active connections across all event loops."""
@@ -178,7 +178,7 @@ class ConnectionManager:
                 if connection:
                     try:
                         await connection.close()
-                        logger.info("🔌 Connection closed for loop %s", id(loop))
+                        logger.info("Connection closed for loop %s", id(loop))
                     except Exception as e:
                         logger.warning("Error closing connection for loop %s: %s", id(loop), e)
             
@@ -194,11 +194,24 @@ class ConnectionManager:
             if connection:
                 try:
                     await connection.close()
-                    logger.info("🔌 Connection closed for current loop")
+                    logger.info("Connection closed for current loop")
                 except Exception as e:
                     logger.warning("Error closing connection for current loop: %s", e)
                 finally:
                     del self._connections[current_loop]
+    
+    def mark_connection_for_reuse(self, connection: ClientConnection) -> None:
+        """
+        Mark a connection as available for reuse (placeholder for future pooling).
+        
+        Currently this does nothing, but will be used when connection pooling
+        and multiplexing across endpoints is implemented.
+        
+        Args:
+            connection: The connection to mark for reuse
+        """
+        # TODO: Implement connection pooling logic here
+        logger.debug("Connection marked for potential reuse (feature pending)")
     
     async def __aenter__(self) -> "ConnectionManager":
         """Async context manager entry."""

@@ -66,9 +66,9 @@ class OgmiosSettings(BaseSettings):
         default='["ws://localhost:1337"]',
     )
 
-    # Direct connection settings
-    ogmios_host: str | None = Field(alias="OGMIOS_HOST", default=None)
-    ogmios_port: str | None = Field(alias="OGMIOS_PORT", default=None)
+    # Direct connection settings - None means "not configured"
+    host: str | None = Field(alias="OGMIOS_HOST", default=None)
+    port: str | None = Field(alias="OGMIOS_PORT", default=None)
 
     @property
     def endpoints(self) -> list[str]:
