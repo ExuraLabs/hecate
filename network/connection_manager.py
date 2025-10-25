@@ -16,7 +16,7 @@ class ConnectionManager:
     """
     
     _instance: ClassVar["ConnectionManager | None"] = None
-    _lock: ClassVar[asyncio.Lock | None] = None
+    _locks: ClassVar[dict[asyncio.AbstractEventLoop, asyncio.Lock]] = {}  # Lock per event loop
     _global_endpoint_counter: ClassVar[int] = 0  # Round-robin counter across all instances
     
     def __new__(cls) -> "ConnectionManager":
@@ -49,10 +49,14 @@ class ConnectionManager:
     
     @classmethod
     async def get_lock(cls) -> asyncio.Lock:
-        """Get or create the async lock for thread-safe operations."""
-        if cls._lock is None:
-            cls._lock = asyncio.Lock()
-        return cls._lock
+        """Get or create the async lock for the current event loop."""
+        current_loop = asyncio.get_running_loop()
+        
+        # Check if we already have a lock for this event loop
+        if current_loop not in cls._locks:
+            cls._locks[current_loop] = asyncio.Lock()
+        
+        return cls._locks[current_loop]
     
     def _setup_connection_strategy(self) -> None:
         """
@@ -172,6 +176,7 @@ class ConnectionManager:
     
     async def close(self) -> None:
         """Close all active connections across all event loops."""
+        current_loop = asyncio.get_running_loop()
         lock = await self.get_lock()
         async with lock:
             for loop, connection in list(self._connections.items()):
@@ -184,6 +189,10 @@ class ConnectionManager:
             
             # Clear all connections
             self._connections.clear()
+            
+            # Clean up lock for current loop
+            if current_loop in self._locks:
+                del self._locks[current_loop]
     
     async def close_current_loop(self) -> None:
         """Close connection for current event loop only."""
@@ -199,6 +208,10 @@ class ConnectionManager:
                     logger.warning("Error closing connection for current loop: %s", e)
                 finally:
                     del self._connections[current_loop]
+            
+            # Clean up lock for current loop
+            if current_loop in self._locks:
+                del self._locks[current_loop]
     
     def mark_connection_for_reuse(self, connection: ClientConnection) -> None:
         """
