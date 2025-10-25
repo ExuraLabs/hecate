@@ -15,12 +15,10 @@ async def run_demo() -> None:
 
     sink = CLISink()
 
-    # Initialize client
-    console.print("[bold blue]Connecting to Ogmios...[/]")
-    client = HecateClient()
-    await client.connect()
-
     try:
+        console.print("[bold blue]Connecting to Ogmios...[/]")
+        client = HecateClient()
+
         # 1. Get current tip
         console.print("[bold blue]🔎 Fetching current chain tip...[/]")
         tip, _ = await client.chain_tip.execute()
@@ -100,7 +98,7 @@ async def run_demo() -> None:
         console.print(f"[bold red]Error:[/] {str(e)}")
         raise
     finally:
-        await client.close()
+        # Cleanup connections - ConnectionManager handles connection lifecycle automatically
         await sink.close()
 
 
