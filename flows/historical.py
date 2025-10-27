@@ -342,7 +342,7 @@ async def process_batch(
     )
     
     # Wait for all tasks to complete
-    await wait(futures)
+    wait(futures)
 
     batch_end_time = time.perf_counter()
     logger.info(
