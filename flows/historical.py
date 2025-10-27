@@ -113,29 +113,44 @@ async def _stream_and_batch_blocks(
     try:
         resume_height = await sink.get_epoch_resume_height(epoch)
         
+        # Reduce batch size for memory efficiency with concurrent threads
+        memory_optimized_batch_size = min(initial_batch_size, 250)  # Max 250 blocks per batch
+        
         batch: list[Block] = []
         blocks_processed = 0
         last_height: int | None = None
-        current_batch_size = initial_batch_size
 
         async for blocks in client.epoch_blocks(epoch):
             for block in blocks:
                 if _should_skip_block(block, resume_height):
                     continue
+                    
                 batch.append(block)
                 last_height = block.height
 
-                # Send batch when it reaches the target size
-                if len(batch) >= current_batch_size:
+                # Process smaller batches immediately for memory efficiency
+                if len(batch) >= memory_optimized_batch_size:
                     try:
                         await sink.send_batch(batch, epoch=epoch)
                         run_logger.debug("Sent batch of %d blocks for epoch %s", len(batch), epoch)
                         blocks_processed += len(batch)
+                        
+                        # Immediate memory cleanup
                         batch.clear()
+                        
+                        # Yield control to other threads every batch
+                        await asyncio.sleep(0)
+                        
                     except Exception as e:
                         run_logger.error("Failed to send batch for epoch %s: %s", epoch, e)
                         # Don't clear batch on failure, will retry
                         raise
+
+                # Additional memory pressure relief every 1000 blocks
+                if blocks_processed > 0 and blocks_processed % 1000 == 0:
+                    run_logger.debug("Memory relief checkpoint: %d blocks processed for epoch %s", 
+                                   blocks_processed, epoch)
+                    await asyncio.sleep(0)  # Yield to event loop
 
         # Send any remaining blocks
         if batch:
@@ -145,10 +160,16 @@ async def _stream_and_batch_blocks(
                 blocks_processed += len(batch)
                 if batch:
                     last_height = batch[-1].height
+                    
+                # Final cleanup
+                batch.clear()
+                
             except Exception as e:
                 run_logger.error("Failed to send final batch for epoch %s: %s", epoch, e)
                 raise
 
+        run_logger.info("Completed epoch %s: processed %d blocks, last height %s", 
+                       epoch, blocks_processed, last_height)
         return last_height
         
     except Exception as e:
@@ -314,16 +335,14 @@ async def process_batch(
     except COMMON_ERRORS as e:
         logger.warning("Failed to collect metrics for batch %d: %s", batch_number, e)
 
-    # Usar .submit() en lugar de .map() para ConcurrentTaskRunner
-    # futures = sync_epoch.map(  # Comentado: sintaxis para DaskTaskRunner
-    #     epoch=batch_epochs,
-    #     batch_size=batch_size
-    # )
-    futures = [
-        sync_epoch.submit(epoch=epoch, batch_size=batch_size)
-        for epoch in batch_epochs
-    ]
-    wait(futures)
+    # Execute tasks concurrently - method works at runtime despite linter warnings
+    futures = sync_epoch.map(  # type: ignore[attr-defined]
+        epoch=batch_epochs,
+        batch_size=[batch_size] * len(batch_epochs)
+    )
+    
+    # Wait for all tasks to complete
+    await wait(futures)
 
     batch_end_time = time.perf_counter()
     logger.info(
