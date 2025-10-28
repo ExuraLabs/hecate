@@ -156,7 +156,7 @@ async def historical_sync_flow(
     start_epoch: EpochNumber = FIRST_SHELLEY_EPOCH,
     end_epoch: EpochNumber | None = None,
     batch_size: int | None = None,
-) -> dict[str, Any]:
+) -> None:
     """
     Retrieves and relays data across a range of epochs with maximum efficiency.
     This flow resumes from the last synced epoch if applicable,
@@ -203,7 +203,7 @@ async def historical_sync_flow(
         
         if not epochs:
             logger.info("No epochs to process")
-            return {"status": "completed", "epochs_processed": 0}
+            return
 
         logger.info("Processing %d epochs with %d concurrent workers", total_epochs, max_concurrent_epochs)
 
@@ -226,7 +226,6 @@ async def historical_sync_flow(
                     "Failed to process batch starting at index %d: %s",
                     batch_start_index, e
                 )
-                # Let Prefect's retry mechanism handle the failure
                 raise
 
         flow_end = time.perf_counter()
@@ -238,14 +237,6 @@ async def historical_sync_flow(
             await collect_and_publish_metrics(metrics_agent)
         except COMMON_ERRORS as e:
             logger.warning("Failed to collect final metrics: %s", e)
-
-        return {
-            "status": "completed",
-            "epochs_processed": len(completed_epochs),
-            "completed_epochs": [r.get("epoch") for r in completed_epochs],
-            "total_blocks": sum(r.get("blocks_processed", 0) for r in completed_epochs),
-            "elapsed_seconds": round(elapsed_time, 2),
-        }
 
     except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError, ValueError, TypeError) as e:
         logger.error("Critical error in historical sync flow: %s", e)
