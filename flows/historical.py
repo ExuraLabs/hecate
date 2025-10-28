@@ -1,14 +1,14 @@
 import asyncio
 import time
+from concurrent.futures import ProcessPoolExecutor
 from typing import Any
 
 import ogmios.model.model_map as mm
 from ogmios import Block
-from prefect import flow, get_run_logger, task
-from prefect.cache_policies import NO_CACHE
+from prefect import flow, get_run_logger
 
 from client import HecateClient
-from config.settings import get_batch_settings, get_connection_settings
+from config.settings import get_concurrency_settings
 from constants import FIRST_SHELLEY_EPOCH
 from flows import get_system_checkpoint
 from models import BlockHeight, EpochNumber
@@ -41,149 +41,113 @@ def _should_skip_block(block: Block, resume_height: BlockHeight | None) -> bool:
     return resume_height is not None and block.height <= resume_height
 
 
-@task(
-    retries=3,
-    retry_delay_seconds=10,
-    cache_policy=NO_CACHE,
-    task_run_name="sync_epoch_{epoch}",
-)
-async def sync_epoch(
+def sync_epoch_worker(
     epoch: EpochNumber,
-    batch_size: int = 1000,
-) -> EpochNumber:
+    resume_height: BlockHeight | None = None,
+) -> dict[str, Any]:
     """
-    Synchronize a specific epoch by fetching blocks in batches.
-    Uses connection pooling for improved performance.
-    """
-    logger = get_run_logger()
-    epoch_start = time.perf_counter()
-    logger.debug("▶️  Starting sync for epoch %s", epoch)
-
-    # Apply performance optimization for Block initialization
-    Block.__init__ = fast_block_init
-    
-    # Use HecateClient with connection pooling
-    async with (HistoricalRedisSink() as sink, HecateClient(use_managed_connection=True) as client):
-        last_height = await _stream_and_batch_blocks(
-            client, sink, epoch, batch_size, logger
-        )
-
-        if last_height is None:
-            logger.warning("No blocks processed for epoch %s, cannot mark complete.", epoch)
-            return epoch
-            
-        await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
-        logger.info("✅ Epoch %s completed", epoch)
-
-    epoch_end = time.perf_counter()
-    logger.info("✅ Epoch %s sync complete in %.2fs", epoch, epoch_end - epoch_start)
-    return epoch
-
-
-async def _stream_and_batch_blocks(
-    client: HecateClient,
-    sink: HistoricalRedisSink,
-    epoch: EpochNumber,
-    initial_batch_size: int,
-    run_logger: Any,
-    ) -> int | None:
-    """
-    Stream blocks from client and process them in adaptive batches.
-    
-    This function handles the core logic of streaming blocks from the Ogmios client,
-    batching them for efficient processing, and sending them to the sink. It supports
-    resuming from a previous checkpoint if the epoch was partially processed.
+    Worker function that runs in a separate process.
+    Must be synchronous and use only serializable arguments.
     
     Args:
-        client: The Hecate client for fetching blocks
-        sink: Sink for storing processed blocks  
-        epoch: The epoch number to process
-        initial_batch_size: Starting size for batches
-        run_logger: Logger instance for this run
+        epoch: The epoch number to synchronize
+        resume_height: Optional height to resume from if epoch was partially processed
         
     Returns:
-        The height of the last processed block, or None if no blocks were processed
+        Dictionary with synchronization results and metrics
+    """
+    # Each process has its own event loop
+    return asyncio.run(_async_sync_epoch_worker(epoch, resume_height))
+
+
+async def _async_sync_epoch_worker(
+    epoch: EpochNumber,
+    resume_height: BlockHeight | None = None,
+) -> dict[str, Any]:
+    """
+    Async implementation of epoch synchronization for process workers.
+    Handles all the actual synchronization logic within a dedicated process.
     """
     try:
-        resume_height = await sink.get_epoch_resume_height(epoch)
-        
-        batch: list[Block] = []
+        start_time = time.perf_counter()
         blocks_processed = 0
-        last_height: int | None = None
-        current_batch_size = initial_batch_size
-
-        async for blocks in client.epoch_blocks(epoch):
-            for block in blocks:
-                if _should_skip_block(block, resume_height):
-                    continue
-                batch.append(block)
-                last_height = block.height
-
-                # Send batch when it reaches the target size
-                if len(batch) >= current_batch_size:
-                    try:
-                        await sink.send_batch(batch, epoch=epoch)
-                        run_logger.debug("Sent batch of %d blocks for epoch %s", len(batch), epoch)
-                        blocks_processed += len(batch)
-                        batch.clear()
-                    except Exception as e:
-                        run_logger.error("Failed to send batch for epoch %s: %s", epoch, e)
-                        # Don't clear batch on failure, will retry
-                        raise
-
-        # Send any remaining blocks
-        if batch:
-            try:
-                await sink.send_batch(batch, epoch=epoch)
-                run_logger.debug("Sent batch of %d blocks for epoch %s", len(batch), epoch)
-                blocks_processed += len(batch)
-                if batch:
-                    last_height = batch[-1].height
-            except Exception as e:
-                run_logger.error("Failed to send final batch for epoch %s: %s", epoch, e)
-                raise
-
-        return last_height
+        last_height = BlockHeight(0)
         
+        # Apply performance optimization for Block initialization  
+        Block.__init__ = fast_block_init
+        
+        # Create independent connections for this process
+        # Note: Each process will create its own Redis connection using settings
+        async with HistoricalRedisSink() as sink:
+            async with HecateClient(use_managed_connection=False) as client:
+                
+                # Stream and process blocks for this epoch
+                async for blocks in client.epoch_blocks(epoch):
+                    # Filter blocks based on resume height
+                    filtered_blocks = [
+                        block for block in blocks 
+                        if resume_height is None or block.height > resume_height
+                    ]
+                    
+                    if filtered_blocks:
+                        # Send batch directly without memory control overhead
+                        await sink.send_batch(filtered_blocks, epoch=epoch)
+                        blocks_processed += len(filtered_blocks)
+                        last_height = BlockHeight(filtered_blocks[-1].height)
+                
+                # Mark epoch as complete
+                if last_height > 0:
+                    await sink.mark_epoch_complete(epoch, last_height)
+                
+                elapsed_time = time.perf_counter() - start_time
+                
+                return {
+                    "epoch": epoch,
+                    "blocks_processed": blocks_processed,
+                    "last_height": last_height,
+                    "elapsed_seconds": round(elapsed_time, 2),
+                    "status": "success"
+                }
+                
     except Exception as e:
-        run_logger.error("Error streaming blocks for epoch %s: %s", epoch, e)
-        raise
+        return {
+            "epoch": epoch,
+            "status": "error",
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
 
 
 @flow(name="Historical Sync")
 async def historical_sync_flow(
     *,
     start_epoch: EpochNumber = FIRST_SHELLEY_EPOCH,
-    batch_size: int | None = None,
-    concurrent_epochs: int = 6,
-) -> None:
+    end_epoch: EpochNumber | None = None,
+) -> dict[str, Any]:
     """
-    Retrieves and relays data across a range of epochs against the system checkpoint.
+    Retrieves and relays data across a range of epochs.
     This flow resumes from the last synced epoch if applicable,
     or starts from the specified starting epoch.
-    The synchronization tasks are processed concurrently for improved performance.
-
-    This asynchronous flow uses the default ConcurrentTaskRunner to handle workloads 
-    and ensures data is passed along efficiently using defined batch sizes.
     
-    :param start_epoch: Starting epoch for synchronization
-    :param batch_size: Blocks processed per batch
-    :param concurrent_epochs: Number of epochs to process concurrently
+    Each epoch is processed in a separate process for maximum CPU utilization.
+    The number of concurrent processes is determined by concurrency settings.
+    
+    Args:
+        start_epoch: Starting epoch for synchronization
+        end_epoch: Ending epoch (if None, uses system checkpoint)
+        
+    Returns:
+        Dictionary containing sync results and metrics
     """
     logger = get_run_logger()
     flow_start = time.perf_counter()
 
-    # Initialize singleton metrics agent for this flow
     metrics_agent = MetricsAgent.get_instance()
 
     try:
-        # Get settings from centralized config if not provided explicitly
-        batch_settings = get_batch_settings()
-        connection_settings = get_connection_settings()
-        final_batch_size = batch_size or batch_settings.base_size
-        final_concurrent_epochs = concurrent_epochs or connection_settings.max_concurrent_tasks
+        concurrency_settings = get_concurrency_settings()
+        max_workers = concurrency_settings.max_workers
 
-        # Initial metrics collection before starting sync
         logger.info("Collecting initial metrics before historical sync...")
         try:
             await collect_and_publish_metrics(metrics_agent)
@@ -197,33 +161,84 @@ async def historical_sync_flow(
             logger.info("🔄 Resuming after last synced epoch %d instead of %d", last, start_epoch)
             start_epoch = EpochNumber(last + 1)
 
-        target = get_system_checkpoint()
-        epochs = [EpochNumber(e) for e in range(start_epoch, target + 1)]
-        total_epochs = len(epochs)
+        target = end_epoch or get_system_checkpoint()
+        epoch_range = list(range(start_epoch, target + 1))
+        
+        if not epoch_range:
+            logger.info("No epochs to process")
+            return {"status": "completed", "epochs_processed": 0}
 
-        logger.info("Processing %d epochs with %d concurrent workers", total_epochs, final_concurrent_epochs)
+        logger.info("Processing %d epochs with %d parallel processes", len(epoch_range), max_workers)
 
-        # Process epochs in batches
-        for batch_start_index in range(0, total_epochs, final_concurrent_epochs):
-            try:
-                await process_batch(
-                    total_epochs,
-                    final_concurrent_epochs,
-                    batch_start_index,
-                    epochs,
-                    final_batch_size,
-                    metrics_agent,
+        # Use ProcessPoolExecutor for true parallelism  
+        actual_workers = min(max_workers, len(epoch_range))
+        
+        with ProcessPoolExecutor(max_workers=actual_workers) as executor:
+            loop = asyncio.get_event_loop()
+            
+            # Get resume heights for all epochs
+            async with HistoricalRedisSink() as sink:
+                resume_heights = {}
+                for epoch in epoch_range:
+                    resume_heights[epoch] = await sink.get_epoch_resume_height(EpochNumber(epoch))
+            
+            # Create futures for each epoch
+            futures = []
+            for epoch in epoch_range:
+                future = loop.run_in_executor(
+                    executor,
+                    sync_epoch_worker,
+                    EpochNumber(epoch),
+                    resume_heights.get(epoch)
                 )
-            except COMMON_ERRORS as e:
-                logger.error(
-                    "Failed to process batch starting at index %d: %s",
-                    batch_start_index, e
-                )
-                # Continue with next batch rather than failing completely
-                continue
+                futures.append((epoch, future))
+            
+            # Process all epochs in parallel and collect results
+            logger.info(f"Starting {actual_workers} parallel processes for {len(epoch_range)} epochs")
+            
+            completed_epochs = []
+            failed_epochs = []
+            total_blocks = 0
+            
+            for epoch, future in futures:
+                try:
+                    result = await future
+                    if result["status"] == "success":
+                        completed_epochs.append(result)
+                        total_blocks += result["blocks_processed"]
+                        logger.info(f"✅ Epoch {epoch}: {result['blocks_processed']} blocks in {result['elapsed_seconds']}s")
+                    else:
+                        failed_epochs.append(result)
+                        logger.error(f"❌ Epoch {epoch}: {result.get('error', 'Unknown error')}")
+                except Exception as e:
+                    failed_epochs.append({
+                        "epoch": epoch,
+                        "status": "error",
+                        "error": str(e),
+                        "error_type": type(e).__name__
+                    })
+                    logger.error(f"❌ Epoch {epoch} failed: {e}")
 
         flow_end = time.perf_counter()
-        logger.info("🏁 Historical sync complete in %.2fs", flow_end - flow_start)
+        elapsed_time = flow_end - flow_start
+        logger.info("🏁 Historical sync complete in %.2fs", elapsed_time)
+
+        # Collect final metrics
+        logger.info("Collecting final metrics after historical sync...")
+        try:
+            await collect_and_publish_metrics(metrics_agent)
+        except COMMON_ERRORS as e:
+            logger.warning("Failed to collect final metrics: %s", e)
+
+        return {
+            "status": "completed" if not failed_epochs else "partial",
+            "epochs_processed": len(completed_epochs),
+            "epochs_failed": len(failed_epochs),
+            "completed_epochs": [r["epoch"] for r in completed_epochs],
+            "failed_epochs": [r["epoch"] for r in failed_epochs] if failed_epochs else [],
+            "total_blocks": total_blocks,
+            "elapsed_seconds": round(elapsed_time, 2),
+        }
 
     except (ConnectionError, TimeoutError, RuntimeError, OSError, asyncio.TimeoutError, ValueError, TypeError) as e:
         logger.error("Critical error in historical sync flow: %s", e)
@@ -235,54 +250,3 @@ async def historical_sync_flow(
             await collect_and_publish_metrics(metrics_agent)
         except COMMON_ERRORS as e:
             logger.warning("Failed to collect final metrics: %s", e)
-
-
-async def process_batch(
-    total_epochs: int,
-    max_concurrent_epochs: int,
-    batch_start_index: int,
-    epochs: list[EpochNumber],
-    batch_size: int,
-    metrics_agent: MetricsAgent,
-) -> None:
-    """
-    Process a batch of epochs concurrently using sync_epoch tasks.
-    
-    This function takes a slice of epochs and processes them concurrently
-    using Prefect's task mapping functionality. It provides progress
-    logging and timing information for each batch.
-    """
-    logger = get_run_logger()
-    batch_start_time = time.perf_counter()
-    batch_epochs = epochs[batch_start_index : batch_start_index + max_concurrent_epochs]
-    batch_number = (batch_start_index // max_concurrent_epochs) + 1
-    total_batches = (
-        total_epochs + max_concurrent_epochs - 1
-    ) // max_concurrent_epochs
-
-    logger.info(
-        "🔄 Starting batch %d/%d: epochs %d to %d",
-        batch_number, total_batches, batch_epochs[0], batch_epochs[-1]
-    )
-
-    try:
-        await collect_and_publish_metrics(metrics_agent)
-        logger.debug("Metrics collection completed for batch %d", batch_number)
-    except COMMON_ERRORS as e:
-        logger.warning("Failed to collect metrics for batch %d: %s", batch_number, e)
-
-    try:
-        tasks = [sync_epoch(epoch, batch_size) for epoch in batch_epochs]
-        await asyncio.gather(*tasks, return_exceptions=True)
-    except Exception as e:
-        logger.error("Batch execution failed: %s", e)
-        # Continue processing rather than failing completely
-        pass
-
-    batch_end_time = time.perf_counter()
-    logger.info(
-        "✅ Completed batch %d/%d in %.2fs",
-        batch_number,
-        total_batches,
-        batch_end_time - batch_start_time,
-    )
