@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from typing import Any
 
 from websockets import ClientConnection, connect
@@ -18,14 +19,16 @@ class ConnectionManager:
     simplicity and reliability.
     """
 
-    _instance: "ConnectionManager | None" = None
+    # Multiprocessing-safe singleton: one instance per process (by PID)
+    _instances: dict[int, "ConnectionManager"] = {}
     _lock = asyncio.Lock()
 
     def __new__(cls) -> "ConnectionManager":
-        """Ensure singleton instance."""
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+        """Ensure singleton instance per process (by PID)."""
+        pid = os.getpid()
+        if pid not in cls._instances:
+            cls._instances[pid] = super().__new__(cls)
+        return cls._instances[pid]
     
     def __init__(self) -> None:
         """Initialize connection manager with efficient pooling strategy."""

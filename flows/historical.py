@@ -64,8 +64,8 @@ async def sync_epoch(
     # Apply performance optimization for Block initialization
     Block.__init__ = fast_block_init
     
-    # Use HecateClient without connection pooling for thread safety
-    async with (HistoricalRedisSink() as sink, HecateClient() as client):
+    # Use HecateClient with managed connections for efficiency
+    async with (HistoricalRedisSink() as sink, HecateClient(use_managed_connection=True) as client):
         last_height = await _stream_and_batch_blocks(
             client, sink, epoch, batch_size, logger
         )
@@ -159,7 +159,7 @@ async def _stream_and_batch_blocks(
             "n_workers": get_dask_settings().n_workers,
             "threads_per_worker": 1,
             "memory_limit": get_dask_settings().worker_memory_limit,
-            "processes": False,  # Use threads instead of processes to share event loop
+            "processes": True,  # Use threads instead of processes to share event loop
             "dashboard_address": None,  # Disable dashboard to reduce overhead
         },
     ),
