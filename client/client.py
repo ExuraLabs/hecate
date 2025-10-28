@@ -1,10 +1,10 @@
-from typing import Any, AsyncIterator
 import logging
+from typing import Any, AsyncIterator
 
+import orjson as json
 from ogmios import Block, Point
 from ogmios.client import Client as OgmiosClient
 from ogmios.model.ogmios_model import Jsonrpc
-import orjson as json
 from websockets import ClientConnection
 from websockets.protocol import State
 
@@ -12,6 +12,7 @@ from client.chainsync import AsyncFindIntersection, AsyncNextBlock
 from client.ledgerstate import AsyncEpoch, AsyncEraSummaries, AsyncTip
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
 from models import EpochNumber
+from network.connection_manager import get_connection_manager
 from network.connection_strategy import ConnectionStrategy
 
 logger = logging.getLogger(__name__)
@@ -89,16 +90,17 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         )
 
     async def close(self) -> None:
-        """Close the connection"""
+        """Close or release the connection back to pool"""
         if self.connection is not None:
             if not self._connection_config.use_connection_manager:
                 # Direct connection - close it immediately
                 await self.connection.close()
                 logger.debug("Closed direct connection")
-            else:  # Necessary? maybe cleanup this else
-                # Managed connection - just release reference
-                # ConnectionManager will handle pooling/reuse internally
-                logger.debug("Released managed connection reference")
+            else:
+                # Managed connection - return to pool for reuse by other tasks
+                manager = get_connection_manager()
+                await manager.release_connection(self.connection)
+                logger.debug("Released managed connection to pool")
             self.connection = None
 
     async def send(self, request: str) -> None:
@@ -124,7 +126,6 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
             )
         return resp
 
-    # Higher-level methods
     async def epoch_blocks(
         self, epoch: EpochNumber, request_id: Any = None
     ) -> AsyncIterator[list[Block]]:

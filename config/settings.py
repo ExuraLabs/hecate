@@ -18,6 +18,31 @@ class DaskSettings(BaseSettings):
     worker_memory_limit: str = Field(alias="DASK_WORKER_MEMORY_LIMIT", default="3GB")
 
 
+class ConnectionSettings(BaseSettings):
+    """Simplified connection settings - only essential configurations."""
+
+    model_config = SettingsConfigDict(
+        env_file=env_file, env_file_encoding="utf-8", extra="ignore"
+    )
+    # Core settings - only what really matters for performance
+    pool_size: int = Field(alias="CONNECTION_POOL_SIZE", default=6)
+    max_concurrent_tasks: int = Field(alias="MAX_CONCURRENT_TASKS", default=6)
+
+
+class ConcurrencySettings(BaseSettings):
+    """Concurrency-related settings for optimal performance."""
+
+    model_config = SettingsConfigDict(
+        env_file=env_file, env_file_encoding="utf-8", extra="ignore"
+    )
+    # Connection pooling settings
+    connection_pool_size: int = Field(alias="CONNECTION_POOL_SIZE", default=6)
+    initial_connections: int = Field(alias="INITIAL_CONNECTIONS", default=2)
+    
+    # Redis bulk operations settings
+    redis_bulk_buffer_size: int = Field(alias="REDIS_BULK_BUFFER_SIZE", default=100)
+
+
 class MemorySettings(BaseSettings):
     """Memory-related settings."""
 
@@ -88,6 +113,18 @@ def get_dask_settings() -> DaskSettings:
 
 
 @lru_cache
+def get_connection_settings() -> ConnectionSettings:
+    """Get cached connection settings."""
+    return ConnectionSettings()
+
+
+@lru_cache
+def get_concurrency_settings() -> ConcurrencySettings:
+    """Get cached concurrency settings."""
+    return ConcurrencySettings()
+
+
+@lru_cache
 def get_memory_settings() -> MemorySettings:
     """Get cached memory management settings."""
     return MemorySettings()
@@ -122,6 +159,8 @@ def load_all_settings() -> None:
     on first access, which can help with consistency and performance.
     """
     get_dask_settings()
+    get_connection_settings()
+    get_concurrency_settings()
     get_memory_settings()
     get_redis_settings()
     get_batch_settings()

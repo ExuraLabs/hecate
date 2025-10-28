@@ -1,7 +1,7 @@
 from typing import Any
 
-from ogmios import Point, QueryLedgerTip
 import ogmios.model.ogmios_model as om
+from ogmios import Point, QueryLedgerTip
 
 from client.base import AsyncOgmiosMethod
 
