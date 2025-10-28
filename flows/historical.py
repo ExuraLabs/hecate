@@ -157,9 +157,9 @@ async def _stream_and_batch_blocks(
     task_runner=DaskTaskRunner(  # type: ignore[arg-type]
         cluster_kwargs={
             "n_workers": get_dask_settings().n_workers,
-            "threads_per_worker": 1,
+            "threads_per_worker": 2,
             "memory_limit": get_dask_settings().worker_memory_limit,
-            "processes": True,  # Use threads instead of processes to share event loop
+            "processes": 1,  # Use processes instead of threads to avoid GIL issues
             "dashboard_address": None,  # Disable dashboard to reduce overhead
         },
     ),
