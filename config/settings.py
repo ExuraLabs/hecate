@@ -5,7 +5,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-env_file = ".env"  # ".env.production"
+env_file = ".env.production"  # ".env"
 
 
 class DaskSettings(BaseSettings):
