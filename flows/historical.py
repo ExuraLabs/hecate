@@ -2,13 +2,15 @@ import asyncio
 import time
 from typing import Any
 
-import ogmios.model.model_map as mm
 from ogmios import Block
+import ogmios.model.model_map as mm
 from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
+from prefect.futures import wait
+from prefect_dask import DaskTaskRunner  # type: ignore[attr-defined]
 
 from client import HecateClient
-from config.settings import get_batch_settings, get_concurrency_settings
+from config.settings import get_batch_settings, get_dask_settings
 from constants import FIRST_SHELLEY_EPOCH
 from flows import get_system_checkpoint
 from models import BlockHeight, EpochNumber
@@ -43,7 +45,7 @@ def _should_skip_block(block: Block, resume_height: BlockHeight | None) -> bool:
 
 @task(
     retries=3,
-    retry_delay_seconds=15,
+    retry_delay_seconds=10,
     cache_policy=NO_CACHE,
     task_run_name="sync_epoch_{epoch}",
 )
@@ -150,28 +152,42 @@ async def _stream_and_batch_blocks(
         raise
 
 
-@flow(name="Historical Sync")
+@flow(  # type: ignore[arg-type]
+    name="Historical Sync",
+    task_runner=DaskTaskRunner(  # type: ignore[arg-type]
+        cluster_kwargs={
+            "n_workers": get_dask_settings().n_workers,
+            "threads_per_worker": 1,
+            "memory_limit": get_dask_settings().worker_memory_limit,
+        },
+    ),
+)
 async def historical_sync_flow(
     *,
     start_epoch: EpochNumber = FIRST_SHELLEY_EPOCH,
-    end_epoch: EpochNumber | None = None,
     batch_size: int | None = None,
+    concurrent_epochs: int | None = None,
 ) -> None:
     """
-    Retrieves and relays data across a range of epochs with maximum efficiency.
+    Retrieves and relays data across a range of epochs against the system checkpoint.
     This flow resumes from the last synced epoch if applicable,
     or starts from the specified starting epoch.
-    
-    Uses Prefect's native concurrency with optimized task execution for performance
-    comparable to Dask while maintaining all Prefect benefits.
+    The synchronization tasks are processed concurrently for improved performance.
 
-    Args:
-        start_epoch: Starting epoch for synchronization
-        end_epoch: Ending epoch (if None, uses system checkpoint)
-        batch_size: Blocks processed per batch (if None, uses settings)
-        
-    Returns:
-        Dictionary containing sync results and metrics
+    This asynchronous flow uses a Dask-based task runner to handle workloads and ensures
+    data is passed along efficiently using defined batch sizes. The execution time is logged
+    to monitor the performance of the process.
+
+    :param start_epoch: The starting epoch for synchronization. Defaults to FIRST_SHELLEY_EPOCH.
+    :type start_epoch: EpochNumber
+    :param batch_size: The number of blocks processed per batch for synchronization. 
+     Defaults to BASE_BATCH_SIZE from settings (typically 1000 in production).
+    :type batch_size: int | None
+    :param concurrent_epochs: The number of epochs to process concurrently. 
+     Defaults to DASK_N_WORKERS (6) from settings if not provided.
+    :type concurrent_epochs: int | None
+    :return: This flow does not return any value.
+    :rtype: None
     """
     logger = get_run_logger()
     flow_start = time.perf_counter()
@@ -179,10 +195,10 @@ async def historical_sync_flow(
     metrics_agent = MetricsAgent.get_instance()
 
     try:
+        # Load settings from centralized config if not provided explicitly
         batch_settings = get_batch_settings()
-        concurrency_settings = get_concurrency_settings()
         final_batch_size = batch_size or batch_settings.base_size
-        max_concurrent_epochs = concurrency_settings.max_workers
+        final_concurrent_epochs = concurrent_epochs or get_dask_settings().n_workers
 
         logger.info("Collecting initial metrics before historical sync...")
         try:
@@ -197,7 +213,7 @@ async def historical_sync_flow(
             logger.info("🔄 Resuming after last synced epoch %d instead of %d", last, start_epoch)
             start_epoch = EpochNumber(last + 1)
 
-        target = end_epoch or get_system_checkpoint()
+        target = get_system_checkpoint()
         epochs = [EpochNumber(e) for e in range(start_epoch, target + 1)]
         total_epochs = len(epochs)
         
@@ -205,28 +221,26 @@ async def historical_sync_flow(
             logger.info("No epochs to process")
             return
 
-        logger.info("Processing %d epochs with %d concurrent workers", total_epochs, max_concurrent_epochs)
+        logger.info("Processing %d epochs with %d concurrent workers", total_epochs, final_concurrent_epochs)
 
-        completed_epochs = []
-
-        for batch_start_index in range(0, total_epochs, max_concurrent_epochs):
+        # Process epochs in batches
+        for batch_start_index in range(0, total_epochs, final_concurrent_epochs):
             try:
-                batch_results = await process_batch(
+                await process_batch(
                     total_epochs,
-                    max_concurrent_epochs,
+                    final_concurrent_epochs,
                     batch_start_index,
                     epochs,
                     final_batch_size,
                     metrics_agent,
                 )
-                completed_epochs.extend(batch_results.get("completed", []))
-
             except COMMON_ERRORS as e:
                 logger.error(
                     "Failed to process batch starting at index %d: %s",
                     batch_start_index, e
                 )
-                raise
+                # Continue with next batch rather than failing completely
+                continue
 
         flow_end = time.perf_counter()
         elapsed_time = flow_end - flow_start
@@ -256,14 +270,21 @@ async def process_batch(
     epochs: list[EpochNumber],
     batch_size: int,
     metrics_agent: MetricsAgent,
-) -> dict[str, Any]:
+) -> None:
     """
-    Process a batch of epochs concurrently using Prefect's optimized task execution.
+    Process a batch of epochs concurrently using sync_epoch tasks.
     
-    This function leverages Prefect's native concurrency for maximum efficiency
-    while maintaining proper error handling and progress tracking.
+    This function takes a slice of epochs and processes them concurrently
+    using Prefect's task mapping functionality with Dask. It provides progress
+    logging and timing information for each batch.
     
-    Returns detailed results for each epoch processed.
+    Args:
+        total_epochs: Total number of epochs to process across all batches
+        max_concurrent_epochs: Maximum number of epochs to process simultaneously
+        batch_start_index: Starting index in the epochs list for this batch
+        epochs: Complete list of epochs to process
+        batch_size: Number of blocks to process per epoch batch
+        metrics_agent: Singleton metrics agent instance for state persistence
     """
     logger = get_run_logger()
     batch_start_time = time.perf_counter()
@@ -278,28 +299,22 @@ async def process_batch(
         batch_number, total_batches, batch_epochs[0], batch_epochs[-1]
     )
 
+    # Collect metrics at the start of each batch
     try:
         await collect_and_publish_metrics(metrics_agent)
         logger.debug("Metrics collection completed for batch %d", batch_number)
     except COMMON_ERRORS as e:
         logger.warning("Failed to collect metrics for batch %d: %s", batch_number, e)
 
-    # Create tasks for all epochs in this batch
-    tasks = [sync_epoch(epoch, batch_size) for epoch in batch_epochs]
-    
-    # Execute all tasks concurrently - let Prefect handle retries automatically
-    completed_epochs = await asyncio.gather(*tasks)
-    
+    # Create futures using Dask task mapping
+    futures = sync_epoch.map(
+        epoch=batch_epochs,
+        batch_size=batch_size
+    )
+    wait(futures)
+
     batch_end_time = time.perf_counter()
     logger.info(
-        "✅ Completed batch %d/%d in %.2fs (processed %d epochs)",
-        batch_number,
-        total_batches,
-        batch_end_time - batch_start_time,
-        len(completed_epochs)
+        "✅ Completed batch %d/%d in %.2fs",
+        batch_number, total_batches, batch_end_time - batch_start_time
     )
-    
-    return {
-        "completed": [{"epoch": epoch, "status": "success"} for epoch in completed_epochs],
-        "failed": []  # Prefect handles failures via retries
-    }
