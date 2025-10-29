@@ -47,6 +47,9 @@ class ConnectionManager:
 
         self._initialized = True
 
+        # Track the event loop this pool is associated with
+        self._event_loop = asyncio.get_running_loop()
+
         # Simplified connection pool - single pool for all tasks
         self._available_connections: list[ClientConnection] = []
         self._in_use_connections: set[ClientConnection] = set()
@@ -75,17 +78,18 @@ class ConnectionManager:
 
     async def get_connection(self) -> ClientConnection:
         """
-        Get a WebSocket connection from the pool.
-        
-        Returns an available connection from the pool, or creates a new one
-        if needed and under the pool size limit.
-        
-        Returns:
-            ClientConnection: WebSocket connection ready for use
-            
-        Raises:
-            ConnectionError: If connection cannot be established
+        Get a WebSocket connection from the pool, ensuring event loop safety.
+        If the event loop has changed, clean up the pool and reinitialize for the new loop.
         """
+        current_loop = asyncio.get_running_loop()
+        if not hasattr(self, '_event_loop') or self._event_loop != current_loop:
+            # Event loop changed: clean up pool and rebind
+            await self.close()
+            self._event_loop = current_loop
+            self._available_connections = []
+            self._in_use_connections = set()
+            logger.info("Event loop changed, connection pool reset for new loop.")
+
         async with self._lock:
             # Try to get an available connection from pool
             for connection in self._available_connections[:]:
