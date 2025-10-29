@@ -15,6 +15,7 @@ from constants import FIRST_SHELLEY_EPOCH
 from flows import get_system_checkpoint
 from models import BlockHeight, EpochNumber
 from monitoring.metrics_agent import collect_and_publish_metrics, MetricsAgent
+from network.connection_manager import ConnectionManager
 from sinks.redis import HistoricalRedisSink
 
 
@@ -320,3 +321,9 @@ async def process_batch(
         "✅ Completed batch %d/%d in %.2fs",
         batch_number, total_batches, batch_end_time - batch_start_time
     )
+
+    try:
+        await ConnectionManager.cleanup_pool()
+        logger.info("Connection pool cleaned up after batch %d", batch_number)
+    except Exception as e:
+        logger.warning("Error cleaning up connection pool after batch %d: %s", batch_number, e)

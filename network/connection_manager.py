@@ -12,6 +12,16 @@ logger = logging.getLogger(__name__)
 
 
 class ConnectionManager:
+    @staticmethod
+    async def cleanup_pool():
+        """
+        Clean up all connections in the current process's pool.
+        This should be called at the end of each batch to avoid event loop issues.
+        """
+        pid = os.getpid()
+        instance = ConnectionManager._instances.get(pid)
+        if instance is not None:
+            await instance.close()
     """
     High-performance connection manager with true connection pooling.
     
