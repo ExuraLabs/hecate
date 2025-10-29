@@ -83,12 +83,15 @@ class ConnectionManager:
         """
         current_loop = asyncio.get_running_loop()
         if not hasattr(self, '_event_loop') or self._event_loop != current_loop:
-            # Event loop changed: clean up pool and rebind
-            await self.close()
-            self._event_loop = current_loop
+            # Event loop changed: clear pool without closing connections to avoid cross-loop warnings
+            old_count = len(self._available_connections) + len(self._in_use_connections)
             self._available_connections = []
             self._in_use_connections = set()
-            logger.info("Event loop changed, connection pool reset for new loop.")
+            self._event_loop = current_loop
+            logger.debug(
+                "Event loop changed, cleared %d connections without closing to avoid cross-loop warnings.",
+                old_count
+            )
 
         async with self._lock:
             # Try to get an available connection from pool
