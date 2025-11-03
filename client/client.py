@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 from typing import Any, AsyncIterator
 
@@ -5,15 +7,13 @@ import orjson as json
 from ogmios import Block, Point
 from ogmios.client import Client as OgmiosClient
 from ogmios.model.ogmios_model import Jsonrpc
-from websockets import ClientConnection
+from websockets import ClientConnection, connect as ws_connect
 from websockets.protocol import State
 
 from client.chainsync import AsyncFindIntersection, AsyncNextBlock
 from client.ledgerstate import AsyncEpoch, AsyncEraSummaries, AsyncTip
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
 from models import EpochNumber
-from network.connection_manager import get_connection_manager
-from network.connection_strategy import ConnectionStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -22,17 +22,18 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
     """
     Async Ogmios connection client.
 
-    Asynchronous wrapper of the Ogmios websockets client.
-    Inherits from OgmiosClient for type compatibility but implements
-    its own async connection management as well as additional, higher-level methods.
+    Asynchronous wrapper of the Ogmios websockets client that inherits from OgmiosClient
+    for type compatibility while implementing custom async connection management and
+    additional higher-level query methods.
 
-    :param host: In case of provided, the host to connect to.
-    :param port: In case of provided, the port to connect to.
-    :param path: In case of provided, the path to connect to.
-    :param secure: In case of provided, whether to use a secure connection.
-    :param rpc_version: The JSON-RPC version to use.
-    :param connection: An existing WebSocket connection to use. If None, will determine strategy.
-    :param use_managed_connection: Whether to prefer managed connections over direct ones.
+    Args:
+        host: Hostname to connect to.
+        port: Port to connect to.
+        path: WebSocket path. Defaults to "".
+        secure: Whether to use a secure (wss://) connection. Defaults to False.
+        rpc_version: JSON-RPC version to use. Defaults to 2.0.
+        endpoint_url: Full WebSocket URL (e.g., ws://localhost:1337).
+                      When provided, overrides host/port/secure.
     """
 
     # noinspection PyMissingConstructor
@@ -43,20 +44,16 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         path: str = "",
         secure: bool = False,
         rpc_version: Jsonrpc = Jsonrpc.field_2_0,
-        connection: ClientConnection | None = None,
-        use_managed_connection: bool = False,  # False para demo.py, True para historical sync
+        *,
+        endpoint_url: str | None = None,
     ) -> None:
-        self.rpc_version = rpc_version
-        self.connection = connection
+        self.host = host
+        self.port = port
         self.path = path
         self.secure = secure
-        
-        # Determine connection strategy using dedicated class
-        self._connection_config = ConnectionStrategy.determine_strategy(
-            host=host,
-            port=port,
-            use_managed_connection=use_managed_connection
-        )
+        self.rpc_version = rpc_version
+        self.connection: ClientConnection | None = None
+        self.endpoint_url = endpoint_url
 
         # chainsync methods
         self.find_intersection = AsyncFindIntersection(self)
@@ -67,9 +64,9 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         self.chain_tip = AsyncTip(self)
         self.epoch = AsyncEpoch(self)
 
-    # Connection management
-    async def __aenter__(self) -> "HecateClient":
-        await self.connect()
+    async def __aenter__(self) -> HecateClient:
+        if not self.connection:
+            await self.connect()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -78,51 +75,46 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
 
     async def connect(self, **connection_params: Any) -> None:
         """Connect to the Ogmios server"""
-        if self.connection is not None and self.connection.state == State.OPEN:
+        if self.connection is not None:
             return  # Already connected, noop
-            
-        # Use ConnectionStrategy to create connection
-        self.connection = await ConnectionStrategy.create_connection(
-            config=self._connection_config,
-            path=self.path,
-            secure=self.secure,
-            **connection_params
-        )
+
+        # Use endpoint_url if provided, otherwise build from host/port/secure
+        if self.endpoint_url:
+            connection_url = self.endpoint_url
+        else:
+            if not self.host:
+                raise ValueError("Host must be specified to build a connection URL")
+            scheme = "wss" if self.secure else "ws"
+            connection_url = f"{scheme}://{self.host}:{self.port or 1337}{self.path}"
+
+        self.connection = await ws_connect(connection_url)
 
     async def close(self) -> None:
-        """Close or release the connection back to pool"""
-        if self.connection is not None:
-            if not self._connection_config.use_connection_manager:
-                # Direct connection - close it immediately
-                await self.connection.close()
-                logger.debug("Closed direct connection")
-            else:
-                # Managed connection - return to pool for reuse by other tasks
-                manager = get_connection_manager()
-                await manager.release_connection(self.connection)
-                logger.debug("Released managed connection to pool")
-            self.connection = None
+        if self.connection is None:
+            return  # Already closed, noop
+
+        await self.connection.close()
+        self.connection = None
 
     async def send(self, request: str) -> None:
         """Send a request to the Ogmios server."""
         if not self.connection or self.connection.state != State.OPEN:
-            await self.connect()
-            assert self.connection is not None
-        
+            raise RuntimeError("No connection available")
+
         await self.connection.send(request)
 
     async def receive(self) -> dict[str, Any]:
         """Receive a response from the Ogmios server."""
         if not self.connection or self.connection.state != State.OPEN:
-            await self.connect()
-            assert self.connection is not None
+            raise RuntimeError("No connection available")
 
         raw_response = await self.connection.recv()
         resp: dict[str, Any] = json.loads(raw_response)
-        
+
         if resp.get("version"):
             raise Exception(
-                "Invalid Ogmios version. Only supports Ogmios server version v6.0.0 and above."
+                "Invalid Ogmios version. The ogmios-python client only supports "
+                "Ogmios server version v6.0.0 and above."
             )
         return resp
 
