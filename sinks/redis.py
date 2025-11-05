@@ -5,15 +5,11 @@ import orjson as json
 from ogmios import Block
 from prefect import get_run_logger
 
-from config.settings import get_redis_settings, get_concurrency_settings
+from config.settings import redis_settings
 from constants import FIRST_SHELLEY_EPOCH
 from models import BlockHeight, EpochNumber
+from sinks.backpressure_monitor import RedisBackpressureMonitor
 from sinks.base import DataSink
-from sinks.backpressure_monitor import (
-    RedisBackpressureConfig,
-    RedisBackpressureMonitor,
-)
-from sinks.memory_management import AdaptiveMemoryController
 
 _redis_module = importlib.import_module("redis.asyncio")
 aioredis = _redis_module
@@ -40,7 +36,7 @@ class RedisSink(DataSink):
         await self.redis.rpush(self.block_queue, json.dumps(block_data))
         await self.redis.hset(self.status_key, "last_block_hash", block_data["hash"])
         await self.redis.hset(
-            self.status_key, "last_block_slot", str(block_data["slot"]),
+            self.status_key, "last_block_slot", str(block_data["slot"])
         )
 
     async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:
@@ -139,10 +135,6 @@ class HistoricalRedisSink(DataSink):
             The initial epoch boundary; used to initialize `last_synced_epoch` if the key is missing.
         prefix (str):
             Redis key namespace prefix (default "hecate:history:").
-        max_data_batches (int):
-            Max number of block‐batch entries to retain in the data stream (default 10000).
-        max_event_entries (int):
-            Max number of event entries to retain in the event stream (default 10000).
 
     Methods:
         __aenter__ / __aexit__:
@@ -155,8 +147,6 @@ class HistoricalRedisSink(DataSink):
             Retrieve the current `last_synced_epoch` value from Redis, or start_epoch if missing.
         get_epoch_resume_height(epoch) -> BlockHeight | None:
             Retrieve the last processed block height for an in‐progress epoch.
-        is_backpressure_active() -> bool:
-            Check if backpressure is currently limiting processing.
         get_status() -> dict:
             Return health and progress metrics (e.g. synced epoch, pending counts, connection status).
         close():
@@ -168,19 +158,15 @@ class HistoricalRedisSink(DataSink):
         *,
         start_epoch: EpochNumber = FIRST_SHELLEY_EPOCH,
         prefix: str = "hecate:history:",
-        max_data_batches: int = 10000,
-        max_event_entries: int = 10000,
     ):
         self.prefix = prefix
 
         # Stream of block‐batch payloads:
         #   • Entries: {"type":"batch", "epoch":<int>, "data":<orjson bytes>}
-        #   • Trimmed to the most recent `max_data_batches` batches.
         self.data_stream = f"{prefix}data_stream"
 
         # Stream of audit/control events:
         #   • Entries: {"type":"batch_sent"|"epoch_complete"|"…", "epoch":<int>, …}
-        #   • Trimmed to the most recent `max_event_entries` events.
         self.event_stream = f"{prefix}event_stream"
 
         # Hash (Structure) of in‐progress epochs' resume positions:
@@ -199,43 +185,21 @@ class HistoricalRedisSink(DataSink):
         self.last_synced_epoch = f"{prefix}last_synced_epoch"
 
         self.start_epoch = start_epoch
-        self.max_data_batches = max_data_batches
-        self.max_event_entries = max_event_entries
-        self._redis_settings = get_redis_settings()
-
         self.redis: aioredis.Redis | None = None  # type: ignore
         self._advance_sha: str | None = None
         self.logger = get_run_logger()
-        self.backpressure_monitor: RedisBackpressureMonitor | None = None
-        
-        # Initialize memory controller
-        self.memory_controller = AdaptiveMemoryController()
-
-        # Initialize backpressure config using Redis settings
-        backpressure_config = RedisBackpressureConfig(
-            max_depth=self._redis_settings.max_stream_depth,
-            check_interval=self._redis_settings.check_interval,
-        )
-        self.backpressure_config = backpressure_config
-        
-        self._bulk_buffer: list[tuple[list[Block], EpochNumber]] = []
-        concurrency_settings = get_concurrency_settings()
-        self._bulk_buffer_size = concurrency_settings.redis_bulk_buffer_size  # Configurable bulk operations for efficiency
-        self._bulk_lock = None  # Will be initialized in __aenter__
+        self.backpressure_monitor: RedisBackpressureMonitor
 
     async def __aenter__(self):
-        url = self._redis_settings.url
+        url = redis_settings.url
         self.redis = aioredis.from_url(url, decode_responses=False)
         self.logger.debug("🔗 Connecting to Redis at %s", url)
 
-        import asyncio
-        self._bulk_lock = asyncio.Lock()
-
-        # Initialize and start backpressure monitor
         self.backpressure_monitor = RedisBackpressureMonitor(
             redis_client=self.redis,
             stream_key=self.data_stream,
-            config=self.backpressure_config,
+            max_depth=redis_settings.max_stream_depth,
+            check_interval=redis_settings.check_interval,
         )
         self.backpressure_monitor.start()
         self.logger.debug("✅ Backpressure monitor started")
@@ -248,13 +212,6 @@ class HistoricalRedisSink(DataSink):
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        # Flush any remaining buffered operations before closing
-        if self._bulk_lock and self._bulk_buffer:
-            async with self._bulk_lock:
-                if self._bulk_buffer:
-                    await self._flush_bulk_buffer()
-                    self.logger.debug("Flushed remaining buffer on exit")
-        
         if self.backpressure_monitor:
             await self.backpressure_monitor.stop()
             self.logger.debug("🛑 Backpressure monitor stopped")
@@ -263,100 +220,39 @@ class HistoricalRedisSink(DataSink):
             self.logger.debug("🛑 Redis connection closed")
 
     async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:
-        """
-        Buffered batch sending to Redis with bulk operations for maximum efficiency.
-        
-        Accumulates batches across multiple tasks and flushes in large bulk operations
-        to minimize Redis round-trips and contention.
-        """
-        if not self.redis:
-            raise RuntimeError("Redis client not initialized")
-        if not self.backpressure_monitor:
-            raise RuntimeError("Backpressure monitor not initialized")
+        assert self.redis, "Not initialized"
 
-        # Backpressure control
-        await self._handle_backpressure()
+        await self.backpressure_monitor.wait_if_paused()
 
         epoch = kwargs.pop("epoch")
-        
-        # Handle memory management before processing the batch
-        await self.memory_controller.pause_processing_if_needed(epoch)
-
-        if not blocks:
-            self.logger.debug("Empty batch for epoch %s, skipping", epoch)
-            return
-
-        # Buffer this batch for bulk processing
-        if self._bulk_lock:
-            async with self._bulk_lock:
-                self._bulk_buffer.append((blocks.copy(), epoch))
-                
-                # Check if we should flush the bulk buffer
-                total_blocks = sum(len(batch_blocks) for batch_blocks, _ in self._bulk_buffer)
-                
-                if total_blocks >= self._bulk_buffer_size:
-                    await self._flush_bulk_buffer()
-        else:
-            # Fallback to individual processing if lock not initialized
-            await self._send_batch_individual(blocks, epoch)
-
         last_height = blocks[-1].height
 
-        # OPTIMIZATION: Use optimized batch preparation
-        batch_list = await self._prepare_blocks_batch(blocks)
-        payload = json.dumps(batch_list)
-        
-        # OPTIMIZATION: Single pipeline execution for all operations
         pipe = self.redis.pipeline(transaction=True)
-        
-        # 1) data stream - with compression consideration for large payloads
+
+        # 1) data stream
+        batch_list = [await self._prepare_block(b) for b in blocks]
+        payload = json.dumps(batch_list)
         pipe.xadd(
             self.data_stream,
             {"type": "batch", "epoch": epoch, "data": payload},
-            maxlen=self.max_data_batches,
             approximate=True,
         )
-        
         # 2) event stream
         pipe.xadd(
             self.event_stream,
-            {"type": "batch_sent", "epoch": epoch, "height": last_height, "count": len(blocks)},
-            maxlen=self.max_event_entries,
+            {"type": "batch_sent", "epoch": epoch, "height": last_height},
             approximate=True,
         )
-        
         # 3) resume cursor
         pipe.hset(self.resume_map, epoch, last_height)
-        
-        # Execute all operations in single pipeline for maximum efficiency
         await pipe.execute()
 
-        self.logger.debug("Sent batch for epoch %s, up to height %s", epoch, last_height)
-
-    async def _handle_backpressure(self) -> None:
-        """
-        Internal method to handle backpressure control.
-        
-        This encapsulates all backpressure logic within the sink,
-        keeping it isolated from the flow control layer.
-        """
-        if self.backpressure_monitor:
-            await self.backpressure_monitor.wait_if_paused()
-
-    def is_backpressure_active(self) -> bool:
-        """
-        Check if backpressure is currently active.
-        
-        Returns:
-            True if processing should be paused due to backpressure
-        """
-        return (
-            self.backpressure_monitor is not None 
-            and self.backpressure_monitor.is_paused
-        )
+        self.logger.debug(f"Sent batch for epoch {epoch}, up to height {last_height}")
 
     async def mark_epoch_complete(
-        self, epoch: EpochNumber, last_height: BlockHeight,
+        self,
+        epoch: EpochNumber,
+        last_height: BlockHeight,
     ) -> EpochNumber:
         """
         Mark an epoch as complete by updating Redis with the relevant information
@@ -377,15 +273,13 @@ class HistoricalRedisSink(DataSink):
         :return: The updated last synced epoch number after Redis executes the Lua script.
         :rtype: EpochNumber
         """
-        if not (self.redis and self._advance_sha):
-            raise RuntimeError("Redis not initialized")
+        assert self.redis and self._advance_sha, "Redis not initialized"
         # 1) enqueue into ready_set & log event
         pipe = self.redis.pipeline(transaction=True)
         pipe.sadd(self.ready_set, epoch)
         pipe.xadd(
             self.event_stream,
             {"type": "epoch_complete", "epoch": epoch, "last_height": last_height},
-            maxlen=self.max_event_entries,
             approximate=True,
         )
         await pipe.execute()
@@ -407,27 +301,22 @@ class HistoricalRedisSink(DataSink):
         return last_synced
 
     async def get_last_synced_epoch(self) -> EpochNumber:
-        """Get the last synced epoch from Redis, or `start_epoch` if not set."""
-        if not self.redis:
-            raise RuntimeError("Redis client not initialized")
+        """Get the last synced epoch from Redis, or `start_epoch` if not set"""
+        assert self.redis, "Not initialized"
         val = await self.redis.get(self.last_synced_epoch)
         return EpochNumber(int(val)) if val else self.start_epoch
 
     async def get_epoch_resume_height(self, epoch: EpochNumber) -> BlockHeight | None:
-        """Get the resume height for a specific epoch."""
-        if not self.redis:
-            raise RuntimeError("Redis client not initialized")
+        assert self.redis, "Not initialized"
         val = await self.redis.hget(self.resume_map, epoch)
         return BlockHeight(int(val)) if val else None
 
     async def get_status(self) -> dict[str, Any]:
-        """Get the status of the Redis sink."""
-        if not self.redis:
-            raise RuntimeError("Redis client not initialized")
+        assert self.redis, "Not initialized"
         return {
             "last_synced_epoch": await self.get_last_synced_epoch(),
             "epochs_individually_completed_pending_sync": await self.redis.scard(
-                self.ready_set,
+                self.ready_set
             ),
             "epochs_with_active_resume_points": await self.redis.hlen(self.resume_map),
             "redis_connection": "ok",
@@ -452,147 +341,6 @@ class HistoricalRedisSink(DataSink):
             dict: A dictionary representation of the block ready for serialization
         """
         return await RedisSink._prepare_block(block)
-
-    async def _prepare_blocks_batch(self, blocks: list[Block]) -> list[dict[str, Any]]:
-        """
-        Optimized batch preparation of blocks for Redis storage.
-        
-        This method processes blocks more efficiently than individual preparation
-        by reducing function call overhead and enabling potential optimizations.
-        
-        Args:
-            blocks: List of Block objects to prepare
-            
-        Returns:
-            list: List of dictionary representations ready for serialization
-        """
-        # Process blocks in batch for better efficiency
-        prepared_blocks = []
-        
-        for block in blocks:
-            # Inline the preparation logic for better performance
-            block_data = {"slot": block.slot, "hash": block.id}  # Priority fields first
-            
-            # Filter out unwanted fields from the block
-            filtered_block_fields = ("_schematype", "issuer", "id")
-            block_data.update({
-                field: value
-                for field, value in block.__dict__.items()
-                if field not in filtered_block_fields
-                and field != "transactions"  # Handle txs separately
-            })
-            
-            # Filter out unwanted fields from transactions (optimized)
-            if hasattr(block, 'transactions') and block.transactions:
-                filtered_tx_fields = ("datums", "scripts", "redeemers")
-                block_data["transactions"] = [
-                    {
-                        field: value
-                        for field, value in tx.items()
-                        if field not in filtered_tx_fields
-                    }
-                    for tx in block.transactions
-                ]
-            else:
-                block_data["transactions"] = []
-            
-            prepared_blocks.append(block_data)
-        
-        return prepared_blocks
-    
-    async def _flush_bulk_buffer(self) -> None:
-        """
-        Flush all buffered batches in single large Redis pipeline.
-        
-        This method combines multiple small batches from different tasks
-        into one large Redis operation for maximum efficiency.
-        """
-        if not self._bulk_buffer or not self.redis:
-            return
-        
-        self.logger.debug("Flushing bulk buffer with %d batches", len(self._bulk_buffer))
-        
-        # Create one large pipeline for all buffered operations
-        pipe = self.redis.pipeline(transaction=True)
-        
-        # Process all buffered batches
-        total_blocks = 0
-        epochs_processed = set()
-        
-        for blocks, epoch in self._bulk_buffer:
-            if not blocks:
-                continue
-                
-            total_blocks += len(blocks)
-            epochs_processed.add(epoch)
-            last_height = blocks[-1].height
-            
-            # Prepare blocks for this batch
-            batch_list = await self._prepare_blocks_batch(blocks)
-            payload = json.dumps(batch_list)
-            
-            # Add operations to pipeline
-            pipe.xadd(
-                self.data_stream,
-                {"type": "batch", "epoch": epoch, "data": payload},
-                maxlen=self.max_data_batches,
-                approximate=True,
-            )
-            
-            pipe.xadd(
-                self.event_stream,
-                {"type": "batch_sent", "epoch": epoch, "height": last_height, "count": len(blocks)},
-                maxlen=self.max_event_entries,
-                approximate=True,
-            )
-            
-            pipe.hset(self.resume_map, epoch, last_height)
-        
-        # Execute all operations in single Redis round-trip
-        await pipe.execute()
-        
-        self.logger.debug("Flushed %d blocks across %d epochs in bulk operation", 
-                         total_blocks, len(epochs_processed))
-        
-        # Clear the buffer
-        self._bulk_buffer.clear()
-    
-    async def _send_batch_individual(self, blocks: list[Block], epoch: EpochNumber) -> None:
-        """
-        Send individual batch (fallback method).
-        
-        Used when bulk operations are not available.
-        """
-        if not blocks:
-            return
-            
-        last_height = blocks[-1].height
-        
-        # Use individual processing
-        batch_list = await self._prepare_blocks_batch(blocks)
-        payload = json.dumps(batch_list)
-        
-        pipe = self.redis.pipeline(transaction=True)
-        
-        pipe.xadd(
-            self.data_stream,
-            {"type": "batch", "epoch": epoch, "data": payload},
-            maxlen=self.max_data_batches,
-            approximate=True,
-        )
-        
-        pipe.xadd(
-            self.event_stream,
-            {"type": "batch_sent", "epoch": epoch, "height": last_height, "count": len(blocks)},
-            maxlen=self.max_event_entries,
-            approximate=True,
-        )
-        
-        pipe.hset(self.resume_map, epoch, last_height)
-        
-        await pipe.execute()
-        
-        self.logger.debug("Sent individual batch for epoch %s: %d blocks", epoch, len(blocks))
 
     async def send_block(self, block: Block) -> None:
         """This method is not used in this class, as we only send batches of blocks instead."""
