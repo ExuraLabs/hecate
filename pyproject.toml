@@ -24,8 +24,7 @@ redis = [
     "redis[hiredis]>=5.2.1",
 ]
 prefect = [
-    "prefect[dask,github]~=3.5",
-    "bokeh>=3.1.0", # for Dask Dashboard UI
+    "prefect[github]~=3.5",
 ]
 
 [tool.mypy]
