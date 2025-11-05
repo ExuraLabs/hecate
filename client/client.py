@@ -1,50 +1,59 @@
-import os
+from __future__ import annotations
+
+import logging
 from typing import Any, AsyncIterator
 
+import orjson as json
 from ogmios import Block, Point
 from ogmios.client import Client as OgmiosClient
 from ogmios.model.ogmios_model import Jsonrpc
-import orjson as json
-from websockets import connect, ClientConnection
+from websockets import ClientConnection, connect as ws_connect
+from websockets.protocol import State
 
 from client.chainsync import AsyncFindIntersection, AsyncNextBlock
 from client.ledgerstate import AsyncEpoch, AsyncEraSummaries, AsyncTip
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
-
 from models import EpochNumber
+
+logger = logging.getLogger(__name__)
 
 
 class HecateClient(OgmiosClient):  # type: ignore[misc]
     """
-    Async Ogmios connection client
+    Async Ogmios connection client.
 
-    Asynchronous wrapper of the Ogmios websockets client.
-    Inherits from OgmiosClient for type compatibility but implements
-    its own async connection management as well as additional, higher-level methods.
+    Asynchronous wrapper of the Ogmios websockets client that inherits from OgmiosClient
+    for type compatibility while implementing custom async connection management and
+    additional higher-level query methods.
 
-    :param host: The host of the Ogmios server.
-        If not provided, defaults the value of the environment variable ``OGMIOS_HOST`` if set,
-        or ``localhost`` otherwise.
-    :param port: The port of the Ogmios server.
-        If not provided, defaults to 1337, unless the environment variable ``OGMIOS_PORT`` is set,
-        in which case it will use that value instead.
-    :param path: Optional path for the WebSocket connection
-    :param secure: Use secure connection
-    :param rpc_version: The JSON-RPC version to use
+    Args:
+        host: Hostname to connect to.
+        port: Port to connect to.
+        path: WebSocket path. Defaults to "".
+        secure: Whether to use a secure (wss://) connection. Defaults to False.
+        rpc_version: JSON-RPC version to use. Defaults to 2.0.
+        endpoint_url: Full WebSocket URL (e.g., ws://localhost:1337).
+                      When provided, overrides host/port/secure.
     """
 
     # noinspection PyMissingConstructor
     def __init__(
         self,
         host: str | None = None,
-        port: int = 1337,
+        port: str | None = None,
         path: str = "",
         secure: bool = False,
         rpc_version: Jsonrpc = Jsonrpc.field_2_0,
+        *,
+        endpoint_url: str | None = None,
     ) -> None:
+        self.host = host
+        self.port = port
+        self.path = path
+        self.secure = secure
         self.rpc_version = rpc_version
-        self.connect_str: str = self.get_connection_url(host, port, path, secure)
         self.connection: ClientConnection | None = None
+        self.endpoint_url = endpoint_url
 
         # chainsync methods
         self.find_intersection = AsyncFindIntersection(self)
@@ -55,95 +64,60 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         self.chain_tip = AsyncTip(self)
         self.epoch = AsyncEpoch(self)
 
-    # Connection management
-    async def __aenter__(self) -> "HecateClient":
-        await self.connect()
+    async def __aenter__(self) -> HecateClient:
+        if not self.connection:
+            await self.connect()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Close client connection when finished"""
         await self.close()
 
-    @staticmethod
-    def get_connection_url(
-        host: str | None = None,
-        port: int = 1337,
-        path: str = "",
-        secure: bool = False,
-    ) -> str:
-        """
-        Generate a WebSocket connection URLto interact with an Ogmios instance.
-
-        Constructs a connection URL using the provided parameters. It also supports
-        using environment variables for the host and port configuration if they are not explicitly
-        provided. The connection protocol can be set to secure (wss) or non-secure (ws), and a
-        specific path can be appended to the constructed URL.
-
-        :param host: The hostname of the server. If not provided, it defaults to the
-            value of the environment variable ``OGMIOS_HOST`` if set, or ``localhost`` otherwise.
-        :param port: The port number to connect to. Defaults to 1337. If the
-            environment variable ``OGMIOS_PORT`` is set, its value will be used instead.
-        :param path: The URL path to append to the connection string. Defaults to an
-            empty string.
-        :param secure: A boolean flag indicating whether to use a secure WebSocket
-            connection (wss) or a non-secure one (ws). Defaults to ``False``.
-        :return: A constructed WebSocket connection URL as a string.
-        :rtype: str
-        """
-        _OGMIOS_HOST = os.getenv("OGMIOS_HOST")
-        if host is None and _OGMIOS_HOST:
-            host = _OGMIOS_HOST
-        else:
-            host = host or "localhost"
-
-        _OGMIOS_PORT = os.getenv("OGMIOS_PORT")
-        if _OGMIOS_PORT:
-            port = int(_OGMIOS_PORT)
-
-        protocol: str = "wss" if secure else "ws"
-        connect_str = f"{protocol}://{host}:{port}/{path}"
-        return connect_str
-
     async def connect(self, **connection_params: Any) -> None:
         """Connect to the Ogmios server"""
-        if self.connection is None:
-            self.connection = await connect(self.connect_str, **connection_params)
+        if self.connection is not None:
+            return  # Already connected, noop
+
+        # Use endpoint_url if provided, otherwise build from host/port/secure
+        if self.endpoint_url:
+            connection_url = self.endpoint_url
+        else:
+            if not self.host:
+                raise ValueError("Host must be specified to build a connection URL")
+            scheme = "wss" if self.secure else "ws"
+            connection_url = f"{scheme}://{self.host}:{self.port or 1337}{self.path}"
+
+        self.connection = await ws_connect(connection_url)
 
     async def close(self) -> None:
-        """Close the connection to the Ogmios server"""
-        if self.connection:
-            await self.connection.close()
+        if self.connection is None:
+            return  # Already closed, noop
+
+        await self.connection.close()
+        self.connection = None
 
     async def send(self, request: str) -> None:
-        """Send a request to the Ogmios server asynchronously
-
-        :param request: The request to send
-        :type request: str
-        """
-        if not self.connection:
-            await self.connect()
-            assert self.connection is not None
+        """Send a request to the Ogmios server."""
+        if not self.connection or self.connection.state != State.OPEN:
+            raise RuntimeError("No connection available")
 
         await self.connection.send(request)
 
     async def receive(self) -> dict[str, Any]:
-        """Receive a response from the Ogmios server
-
-        :return: Request response
-        """
-        if self.connection is None:
-            await self.connect()
-            assert self.connection is not None
+        """Receive a response from the Ogmios server."""
+        if not self.connection or self.connection.state != State.OPEN:
+            raise RuntimeError("No connection available")
 
         raw_response = await self.connection.recv()
         resp: dict[str, Any] = json.loads(raw_response)
+
         if resp.get("version"):
             raise Exception(
-                "Invalid Ogmios version. ogmios-python only supports Ogmios server version v6.0.0 and above."
+                "Invalid Ogmios version. The ogmios-python client only supports "
+                "Ogmios server version v6.0.0 and above."
             )
         return resp
 
-    # Higher-level methods
     async def epoch_blocks(
         self, epoch: EpochNumber, request_id: Any = None
     ) -> AsyncIterator[list[Block]]:

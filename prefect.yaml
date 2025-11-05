@@ -48,7 +48,9 @@ deployments:
       job_variables:
         env:
           REDIS_URL: "{{ prefect.variables.redis_url }}"
-          OGMIOS_HOST: "{{ prefect.variables.ogmios_host }}"
+          OGMIOS_ENDPOINTS: "{{ prefect.variables.ogmios_endpoints }}"
+          REDIS_MAX_STREAM_DEPTH: "{{ prefect.variables.redis_max_stream_depth }}"
+          BATCH_SIZE: "{{ prefect.variables.batch_size }}"
     version:
     tags: [ ]
     concurrency_limit:

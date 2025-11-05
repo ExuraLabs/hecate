@@ -1,20 +1,21 @@
-import multiprocessing
 import time
 from typing import Any
+from multiprocessing import cpu_count
 
 from ogmios import Block
 import ogmios.model.model_map as mm
 from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
 from prefect.futures import wait
-from prefect_dask import DaskTaskRunner  # type: ignore[attr-defined]
+from prefect.task_runners import ProcessPoolTaskRunner
 
-from constants import FIRST_SHELLEY_EPOCH
 from client import HecateClient
-from sinks.redis import HistoricalRedisSink
-
+from config.settings import batch_settings
+from constants import FIRST_SHELLEY_EPOCH
 from flows import get_system_checkpoint
-from models import EpochNumber
+from models import BlockHeight, EpochNumber
+from network import NetworkManager
+from sinks.redis import HistoricalRedisSink
 
 
 def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
@@ -24,16 +25,6 @@ def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
     This optimized initialization directly assigns attributes from kwargs
     without constructing or validating Pydantic models. It's designed for
     processing historical blocks where validation is redundant.
-
-    Note:
-        This method omits all validation checks present in the original
-        implementation. Type mismatches or missing fields won't raise
-        errors, which is acceptable for historical data but potentially
-        dangerous for real-time blocks.
-
-    Performance:
-        When processing hundreds of thousands of blocks, this can significantly
-        reduce CPU without affecting correctness.
     """
     self.blocktype = blocktype
     # Directly assign all attributes without creating _schematype
@@ -43,100 +34,172 @@ def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
     self._schematype = None
 
 
+# Apply performance optimization for Block initialization
+Block.__init__ = fast_block_init
+
+
 @task(
     retries=3,
-    retry_delay_seconds=30,
+    retry_delay_seconds=10,
     cache_policy=NO_CACHE,
     task_run_name="sync_epoch_{epoch}",
 )
 async def sync_epoch(
     epoch: EpochNumber,
-    batch_size: int,
+    endpoint: str,
+    batch_size: int = 1000,
 ) -> EpochNumber:
     """
-    Synchronize a specific epoch by fetching blocks of data in batches and relaying them.
-    The function streams block data from the ledger for a given epoch, sends them to a sink in
-    configurable batch sizes and marks the epoch as complete once fully processed.
-
-    :param epoch: The epoch number to synchronize.
-    :type epoch: EpochNumber
-    :param batch_size: The number of blocks to process in each batch.
-    :type batch_size: int
-    :return: The updated epoch number indicating the last successfully synced epoch.
-    :rtype: EpochNumber
+    Synchronize a specific epoch by fetching blocks in batches.
+    Uses optimized connection pooling and memory management for maximum performance.
     """
     logger = get_run_logger()
     epoch_start = time.perf_counter()
-    logger.debug(f"▶️  Starting sync for epoch {epoch}")
+    logger.debug("▶️  Starting sync for epoch %s on endpoint %s", epoch, endpoint)
 
-    Block.__init__ = fast_block_init
+    async with (
+        HistoricalRedisSink() as sink,
+        HecateClient(endpoint_url=endpoint) as client,
+    ):
+        last_height = await _stream_and_batch_blocks(
+            client, sink, epoch, batch_size, logger
+        )
 
-    # Fetch _and_ stream blocks concurrently
-    async with HistoricalRedisSink() as sink, HecateClient() as client:
-        start_height = await sink.get_epoch_resume_height(epoch) or None
-
-        batches_sent = 0
-        batch: list[Block] = []
-        last_height = -1
-        async for blocks in client.epoch_blocks(epoch):
-            for blk in blocks:
-                # skip blocks already synced
-                if start_height and blk.height <= start_height:
-                    continue
-                batch.append(blk)
-                if len(batch) < batch_size:
-                    continue
-                # send batch to sink
-                batch_start = time.perf_counter()
-                await sink.send_batch(batch, epoch=epoch)
-                batch_end = time.perf_counter()
-                batches_sent += 1
-                last_height = batch[-1].height
-                logger.debug(
-                    f" Batch #{batches_sent}: sent {len(batch)} blocks "
-                    f"in {batch_end - batch_start:.2f}s"
-                )
-                batch.clear()
-
-        # finalize partially filled batch, if any
-        if batch:
-            batch_start = time.perf_counter()
-            await sink.send_batch(batch, epoch=epoch)
-            batch_end = time.perf_counter()
-            batches_sent += 1
-            last_height = batch[-1].height
-            logger.debug(
-                f" Final batch #{batches_sent}: sent {len(batch)} blocks "
-                f"in {batch_end - batch_start:.2f}s"
+        if last_height is None:
+            logger.warning(
+                "No blocks processed for epoch %s, cannot mark complete.", epoch
             )
-            batch.clear()
-        # mark done and advance last_synced_epoch
-        new_last = await sink.mark_epoch_complete(epoch, last_height)
+            return epoch
+
+        await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
+        logger.info("✅ Epoch %s completed", epoch)
 
     epoch_end = time.perf_counter()
-    logger.debug(
-        f"✅ Finished epoch {epoch} in {epoch_end - epoch_start:.2f}s; "
-        f"last_synced_epoch → {new_last}"
+    logger.info("✅ Epoch %s sync complete in %.2fs", epoch, epoch_end - epoch_start)
+    return epoch
+
+
+def _should_skip(block: Block, resume_height: BlockHeight | None) -> bool:
+    """Check if a given block should be skipped based on resume height, if any."""
+    return resume_height is not None and block.height <= resume_height
+
+
+async def _stream_and_batch_blocks(
+    client: HecateClient,
+    sink: HistoricalRedisSink,
+    epoch: EpochNumber,
+    batch_size: int,
+    run_logger: Any,
+) -> int | None:
+    """
+    Stream blocks from the client and process them in optimized batches.
+
+    This function handles the core logic of streaming blocks from the Ogmios client,
+    batching them for efficient processing and sending them to the sink. It supports
+    resuming from a previous checkpoint if the epoch was partially processed.
+
+    Args:
+        client: The Hecate client for fetching blocks
+        sink: Sink for storing processed blocks
+        epoch: The epoch number to process
+        batch_size: Batch size to send blocks in
+        run_logger: Logger instance for this run
+
+    Returns:
+        The height of the last processed block, or None if no blocks were processed
+    """
+    batch: list[Block] = []
+    last_height: int | None = None
+    resume_height = await sink.get_epoch_resume_height(epoch)
+
+    async for blocks in client.epoch_blocks(epoch):
+        for block in blocks:
+            if _should_skip(block, resume_height):
+                continue
+            batch.append(block)
+            last_height = block.height
+
+            if len(batch) < batch_size:
+                continue
+
+            await sink.send_batch(batch, epoch=epoch)
+            run_logger.debug("Sent batch of %d blocks for epoch %s", len(batch), epoch)
+            batch.clear()
+
+    # Send any remaining blocks
+    if batch:
+        await sink.send_batch(batch, epoch=epoch)
+        run_logger.debug(
+            "Sent final batch of %d blocks for epoch %s", len(batch), epoch
+        )
+        last_height = batch[-1].height
+        batch.clear()
+
+    return last_height
+
+
+async def process_batch(
+    total_epochs: int,
+    max_concurrent_epochs: int,
+    batch_start_index: int,
+    epochs: list[EpochNumber],
+    batch_size: int,
+    network_manager: NetworkManager,
+) -> None:
+    """
+    Process a batch of epochs concurrently using sync_epoch tasks.
+
+    This function takes a slice of epochs and processes them concurrently
+    using Prefect's task mapping functionality with Dask. It provides progress
+    logging and timing information for each batch.
+
+    Args:
+        total_epochs: Total number of epochs to process across all batches
+        max_concurrent_epochs: Maximum number of epochs to process simultaneously
+        batch_start_index: Starting index in the epoch list for this batch
+        epochs: Complete list of epochs to process
+        batch_size: Number of blocks to process per epoch batch
+        network_manager: NetworkManager instance for managing connections
+    """
+    logger = get_run_logger()
+    batch_start_time = time.perf_counter()
+    batch_epochs = epochs[batch_start_index : batch_start_index + max_concurrent_epochs]
+    batch_number = (batch_start_index // max_concurrent_epochs) + 1
+    total_batches = (total_epochs + max_concurrent_epochs - 1) // max_concurrent_epochs
+
+    logger.info(
+        "🔄 Starting batch %d/%d: epochs %d to %d",
+        batch_number,
+        total_batches,
+        batch_epochs[0],
+        batch_epochs[-1],
     )
-    return new_last  # type: ignore[no-any-return]
+
+    batch_endpoints = [network_manager.get_connection() for _ in batch_epochs]
+
+    futures = sync_epoch.map(
+        epoch=batch_epochs, endpoint=batch_endpoints, batch_size=batch_size
+    )
+    wait(futures)
+
+    batch_end_time = time.perf_counter()
+    logger.info(
+        "✅ Completed batch %d/%d in %.2fs",
+        batch_number,
+        total_batches,
+        batch_end_time - batch_start_time,
+    )
 
 
-@flow(  # type: ignore[arg-type]
+@flow(
     name="Historical Sync",
-    task_runner=DaskTaskRunner(  # type: ignore[arg-type]
-        cluster_kwargs={
-            "n_workers": multiprocessing.cpu_count()
-            - 2,  # leave some room for other tasks
-            "threads_per_worker": 1,
-            "memory_limit": "2GB",
-        },
-    ),
+    task_runner=ProcessPoolTaskRunner(max_workers=cpu_count()),  # type: ignore[arg-type]
 )
 async def historical_sync_flow(
     *,
     start_epoch: EpochNumber = FIRST_SHELLEY_EPOCH,
-    batch_size: int = 100,
-    concurrent_epochs: int = 6,
+    batch_size: int | None = None,
+    concurrent_epochs: int | None = None,
 ) -> None:
     """
     Retrieves and relays data across a range of epochs against the system checkpoint.
@@ -150,50 +213,55 @@ async def historical_sync_flow(
 
     :param start_epoch: The starting epoch for synchronization. Defaults to FIRST_SHELLEY_EPOCH.
     :type start_epoch: EpochNumber
-    :param batch_size: The number of records processed per batch for synchronization. Defaults to 100.
-    :type batch_size: int
-    :param concurrent_epochs: The number of epochs to process concurrently before waiting. Defaults to 6.
-    :type concurrent_epochs: int
-    :return: This flow does not return any value.
-    :rtype: None
+    :param batch_size: The number of blocks processed per batch for synchronization.
+     Defaults to BASE_BATCH_SIZE from settings (typically 1000 in production).
+    :type batch_size: int | None
+    :param concurrent_epochs: The number of epochs to process concurrently.
+     Defaults to DASK_N_WORKERS (6) from settings if not provided.
+    :type concurrent_epochs: int | None
     """
     logger = get_run_logger()
     flow_start = time.perf_counter()
+
+    batch_size = batch_size or batch_settings.batch_size
+    concurrent_epochs = concurrent_epochs or cpu_count()
+
+    network_manager = NetworkManager()
+
     async with HistoricalRedisSink(start_epoch=start_epoch) as sink:
-        # Here we resume from where we left off or tell redis last_synced_epoch = start_epoch
         last = await sink.get_last_synced_epoch()
+
     if last > start_epoch:
         logger.info(
-            f"🔄 Resuming after last synced epoch {last} instead of {start_epoch}"
+            "🔄 Resuming after last synced epoch %d instead of %d", last, start_epoch
         )
-        start_epoch = last + 1
+        start_epoch = EpochNumber(last + 1)
+
     target = get_system_checkpoint()
-
-    epochs = list(range(start_epoch, target + 1))
+    epochs = [EpochNumber(e) for e in range(start_epoch, target + 1)]
     total_epochs = len(epochs)
-    logger.info(f"Processing {total_epochs} epochs in batches of {concurrent_epochs}")
 
-    # Process epochs in batches of concurrent_epochs
-    for i in range(0, total_epochs, concurrent_epochs):
-        batch_start = time.perf_counter()
-        batch_epochs = epochs[i : i + concurrent_epochs]
-        batch_num = (i // concurrent_epochs) + 1
-        total_batches = (total_epochs + concurrent_epochs - 1) // concurrent_epochs
+    if not epochs:
+        logger.info("No epochs to process")
+        return
 
-        logger.info(
-            f"🔄 Starting batch {batch_num}/{total_batches}: epochs {batch_epochs[0]} to {batch_epochs[-1]}"
-        )
+    logger.info(
+        "Processing %d epochs with %d concurrent workers",
+        total_epochs,
+        concurrent_epochs,
+    )
 
-        # Fire off sync_epoch tasks for this batch
-        futures = sync_epoch.map(epoch=batch_epochs, batch_size=batch_size)
-
-        # Wait for all tasks in this batch to finish
-        wait(futures)
-
-        batch_end = time.perf_counter()
-        logger.info(
-            f"✅ Completed batch {batch_num}/{total_batches} in {batch_end - batch_start:.2f}s"
+    # Process epochs in batches
+    for batch_start_index in range(0, total_epochs, concurrent_epochs):
+        await process_batch(
+            total_epochs,
+            concurrent_epochs,
+            batch_start_index,
+            epochs,
+            batch_size,
+            network_manager,
         )
 
     flow_end = time.perf_counter()
-    logger.info(f"🏁 Historical sync complete in {flow_end - flow_start:.2f}s")
+    elapsed_time = flow_end - flow_start
+    logger.info("🏁 Historical sync complete in %.2fs", elapsed_time)

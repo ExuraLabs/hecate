@@ -1,7 +1,7 @@
 from typing import Any
 
-from ogmios import FindIntersection, Origin, Point, Tip
 import ogmios.model.ogmios_model as om
+from ogmios import FindIntersection, Origin, Point, Tip
 
 from client.base import AsyncOgmiosMethod
 

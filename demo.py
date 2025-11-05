@@ -14,13 +14,12 @@ async def run_demo() -> None:
     console.print()
 
     sink = CLISink()
-
-    # Initialize client
-    console.print("[bold blue]Connecting to Ogmios...[/]")
-    client = HecateClient()
-    await client.connect()
+    client = None
 
     try:
+        console.print("[bold blue]Connecting to Ogmios...[/]")
+        client = HecateClient()
+
         # 1. Get current tip
         console.print("[bold blue]🔎 Fetching current chain tip...[/]")
         tip, _ = await client.chain_tip.execute()
@@ -100,7 +99,8 @@ async def run_demo() -> None:
         console.print(f"[bold red]Error:[/] {str(e)}")
         raise
     finally:
-        await client.close()
+        if client:
+            await client.close()
         await sink.close()
 
 

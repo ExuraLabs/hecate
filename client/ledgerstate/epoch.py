@@ -1,7 +1,7 @@
 from typing import Any
 
-from ogmios import QueryEpoch
 import ogmios.model.ogmios_model as om
+from ogmios import QueryEpoch
 
 from client.base import AsyncOgmiosMethod
 
