@@ -14,6 +14,7 @@ async def run_demo() -> None:
     console.print()
 
     sink = CLISink()
+    client = None
 
     try:
         console.print("[bold blue]Connecting to Ogmios...[/]")
@@ -98,7 +99,8 @@ async def run_demo() -> None:
         console.print(f"[bold red]Error:[/] {str(e)}")
         raise
     finally:
-        # Cleanup connections - ConnectionManager handles connection lifecycle automatically
+        if client:
+            await client.close()
         await sink.close()
 
 
