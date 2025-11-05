@@ -49,22 +49,8 @@ deployments:
         env:
           REDIS_URL: "{{ prefect.variables.redis_url }}"
           OGMIOS_ENDPOINTS: "{{ prefect.variables.ogmios_endpoints }}"
-          PREFECT_MEMORY_LIMIT_GB: "{{ prefect.variables.prefect_memory_limit_gb }}"
-          DASK_WORKER_MEMORY_LIMIT: "{{ prefect.variables.dask_worker_memory_limit }}"
-          DASK_N_WORKERS: "{{ prefect.variables.dask_n_workers }}"
-          MEMORY_WARNING_THRESHOLD: "{{ prefect.variables.memory_warning_threshold }}"
-          MEMORY_CRITICAL_THRESHOLD: "{{ prefect.variables.memory_critical_threshold }}"
-          MEMORY_EMERGENCY_THRESHOLD: "{{ prefect.variables.memory_emergency_threshold }}"
-          MEMORY_CHECK_INTERVAL: "{{ prefect.variables.memory_check_interval }}"
-          MEMORY_PAUSE_DURATION: "{{ prefect.variables.memory_pause_duration }}"
           REDIS_MAX_STREAM_DEPTH: "{{ prefect.variables.redis_max_stream_depth }}"
-          REDIS_WARNING_THRESHOLD: "{{ prefect.variables.redis_warning_threshold }}"
-          REDIS_CHECK_INTERVAL: "{{ prefect.variables.redis_check_interval }}"
-          BASE_BATCH_SIZE: "{{ prefect.variables.base_batch_size }}"
-          MIN_BATCH_SIZE: "{{ prefect.variables.min_batch_size }}"
-          MAX_BATCH_SIZE: "{{ prefect.variables.max_batch_size }}"
-          OGMIOS_HOST: "{{ prefect.variables.ogmios_host }}"
-          OGMIOS_PORT: "{{ prefect.variables.ogmios_port }}"
+          BATCH_SIZE: "{{ prefect.variables.batch_size }}"
     version:
     tags: [ ]
     concurrency_limit:
