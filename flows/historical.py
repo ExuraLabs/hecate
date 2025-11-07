@@ -16,6 +16,7 @@ from flows import get_system_checkpoint
 from models import BlockHeight, EpochNumber
 from network import NetworkManager
 from sinks.redis import HistoricalRedisSink
+from sinks.stream_cleanup import cleanup_redis_streams_task
 
 
 def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
@@ -222,6 +223,8 @@ async def historical_sync_flow(
     """
     logger = get_run_logger()
     flow_start = time.perf_counter()
+
+    cleanup_redis_streams_task.submit()
 
     batch_size = batch_size or batch_settings.batch_size
     concurrent_epochs = concurrent_epochs or cpu_count()
