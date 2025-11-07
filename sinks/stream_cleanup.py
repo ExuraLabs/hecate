@@ -45,7 +45,7 @@ async def _find_trim_target(
     of (watermark_epoch - safety_margin).
     """
     start_id = watermark_id  # Start from watermark (most recent point)
-    batch_size = 2000  # Larger batches = fewer Redis calls
+    batch_size = 2000
     watermark_epoch: int | None = None
     safe_epoch: int | None = None
     trim_target_id: str | None = None
