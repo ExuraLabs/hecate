@@ -2,7 +2,7 @@ import asyncio
 from multiprocessing import cpu_count
 from typing import Any
 
-from prefect import task
+from prefect import get_run_logger, task
 from redis.asyncio import Redis
 
 from config.settings import redis_settings
@@ -22,18 +22,26 @@ SAFETY_BUFFER_MESSAGES = MESSAGES_IN_FLIGHT * 2
 
 def _compute_low_watermark(groups_info: list[dict[bytes, Any]]) -> str | None:
     """Return minimum last-delivered-id across consumer groups."""
+    logger = get_run_logger()
+    
     if not groups_info:
         return None
+
+    # Check if any group hasn't started consuming
+    for group in groups_info:
+        if group[b"last-delivered-id"] == b"0-0":
+            logger.warning(
+                "Consumer group '%s' has not consumed any messages (last-delivered-id=0-0). "
+                "Skipping trim to prevent data loss.",
+                group[b"name"].decode("utf-8")
+            )
+            return None
 
     # Extract last-delivered-id from each group
     delivered_ids = [
         group[b"last-delivered-id"].decode("utf-8")
         for group in groups_info
-        if group[b"last-delivered-id"] != b"0-0"  # Ignore groups without consumption
     ]
-
-    if not delivered_ids:
-        return None
 
     # Low watermark = minimum timestamp among all groups
     min_timestamp = min(int(sid.split("-")[0]) for sid in delivered_ids)
@@ -100,7 +108,7 @@ async def cleanup_redis_streams_task() -> None:
     Trim Redis Stream when memory exceeds threshold, maintaining safety buffer
     of messages from consumer group watermark.
     """
-    redis = Redis.from_url(redis_settings.url, decode_responses=False)
+    redis = Redis.from_url(redis_settings.url)
     stream_key = "hecate:history:data_stream"
     target_bytes = int(TARGET_MEMORY_GB * 1024**3)
 
@@ -117,7 +125,7 @@ async def cleanup_redis_streams_task() -> None:
                 continue  # Stream doesn't exist or below threshold
 
             # 2. Query consumer groups to get low watermark
-            groups_info = await redis.execute_command("XINFO", "GROUPS", stream_key)
+            groups_info = await redis.xinfo_groups(stream_key)
 
             # 3. Calculate low watermark (minimum consumed position)
             watermark_id = _compute_low_watermark(groups_info)
@@ -134,12 +142,11 @@ async def cleanup_redis_streams_task() -> None:
                 continue  # Could not find valid trim target
 
             # 5. Execute XTRIM with approximate mode
-            await redis.execute_command(
-                "XTRIM",
+            await redis.xtrim(
                 stream_key,
-                "MINID",
-                "~",  # Approximate mode
-                trim_target_id,
+                minid=trim_target_id,
+                approximate=True,
+                ref_policy="ACKED"
             )
     except asyncio.CancelledError:
         pass  # Expected when flow completes
