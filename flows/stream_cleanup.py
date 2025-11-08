@@ -45,7 +45,7 @@ async def _find_trim_target(
     redis: Redis, stream_key: str, watermark_id: str, safety_buffer_messages: int
 ) -> str | None:
     """
-    Estimate trim target ID using arithmetic approximation (O(1)).
+    Estimate trim target ID using arithmetic approximation.
     
     Uses XINFO STREAM to get first/last entry timestamps and XLEN for count,
     then interpolates position and reverse-calculates timestamp.
@@ -74,7 +74,7 @@ async def _find_trim_target(
         # All messages have same timestamp - assume uniform distribution
         watermark_position = stream_length // 2
     else:
-        # Linear interpolation: position = (watermark_ts - first_ts) / (last_ts - first_ts) × stream_length
+        # Linear interpolation
         watermark_position = int(
             ((watermark_ts - first_ts) / (last_ts - first_ts)) * stream_length
         )
@@ -85,7 +85,7 @@ async def _find_trim_target(
     if trim_position <= 0:
         return None  # Not enough messages to trim safely
 
-    # Reverse interpolation: trim_ts = first_ts + (trim_position / stream_length) × (last_ts - first_ts)
+    # Reverse interpolation
     if last_ts == first_ts:
         trim_ts = first_ts
     else:
