@@ -11,14 +11,13 @@ INITIAL_DELAY_SECONDS = 80  # Initial grace period for component startup
 WAKE_INTERVAL_SECONDS = 45  # Check interval
 TARGET_MEMORY_GB = 4.5  # Memory threshold to trigger trim
 
-# Stream depth configuration
-BLOCKS_PER_EPOCH = 21_600  # Cardano mainnet average
-BATCH_SIZE = 1000  # Production batch size (blocks per message)
-MESSAGES_PER_EPOCH = BLOCKS_PER_EPOCH // BATCH_SIZE  # 21 messages/epoch
-
-# Safety buffer calculation (stream depth based)
+# Safety buffer calculation based on production rate
+BLOCKS_PER_EPOCH = 21_600
+BATCH_SIZE = 1_000
+MESSAGES_PER_EPOCH = BLOCKS_PER_EPOCH // BATCH_SIZE
 CONCURRENT_WORKERS = cpu_count()
-SAFETY_BUFFER_MESSAGES = CONCURRENT_WORKERS * 2
+MESSAGES_IN_FLIGHT = MESSAGES_PER_EPOCH * CONCURRENT_WORKERS
+SAFETY_BUFFER_MESSAGES = MESSAGES_IN_FLIGHT * 2
 
 
 def _compute_low_watermark(groups_info: list[dict[bytes, Any]]) -> str | None:
@@ -45,33 +44,54 @@ def _compute_low_watermark(groups_info: list[dict[bytes, Any]]) -> str | None:
 async def _find_trim_target(
     redis: Redis, stream_key: str, watermark_id: str, safety_buffer_messages: int
 ) -> str | None:
-    """Count backwards N messages from watermark and return that stream ID."""
-    messages_counted = 0
-    start_id = watermark_id
-    batch_size = 2000  # XREVRANGE batch size (network optimization)
+    """
+    Estimate trim target ID using arithmetic approximation (O(1)).
+    
+    Uses XINFO STREAM to get first/last entry timestamps and XLEN for count,
+    then interpolates position and reverse-calculates timestamp.
+    """
+    # Get stream metadata
+    info = await redis.xinfo_stream(stream_key)
+    stream_length = info["length"]
 
-    while True:
-        # XREVRANGE scans from max (newest) to min (oldest)
-        messages = await redis.xrevrange(
-            stream_key, max=start_id, min="-", count=batch_size
+    if stream_length == 0:
+        return None
+
+    # Extract first/last entry metadata
+    first_entry = info["first-entry"]
+    last_entry = info["last-entry"]
+
+    if not first_entry or not last_entry:
+        return None
+
+    # Parse timestamps from stream IDs (format: "timestamp-sequence")
+    first_ts = int(first_entry[0].decode("utf-8").split("-")[0])
+    last_ts = int(last_entry[0].decode("utf-8").split("-")[0])
+    watermark_ts = int(watermark_id.split("-")[0])
+
+    # Interpolate watermark position in stream
+    if last_ts == first_ts:
+        # All messages have same timestamp - assume uniform distribution
+        watermark_position = stream_length // 2
+    else:
+        # Linear interpolation: position = (watermark_ts - first_ts) / (last_ts - first_ts) × stream_length
+        watermark_position = int(
+            ((watermark_ts - first_ts) / (last_ts - first_ts)) * stream_length
         )
 
-        if not messages:
-            return None  # Reached beginning without counting enough
+    # Calculate trim position (safety buffer messages before watermark)
+    trim_position = watermark_position - safety_buffer_messages
 
-        for msg_id, _ in messages:  # Only need stream_id, not payload
-            messages_counted += 1
+    if trim_position <= 0:
+        return None  # Not enough messages to trim safely
 
-            if messages_counted == safety_buffer_messages:
-                # Found target: this message is exactly N messages back from watermark
-                return msg_id.decode("utf-8")
+    # Reverse interpolation: trim_ts = first_ts + (trim_position / stream_length) × (last_ts - first_ts)
+    if last_ts == first_ts:
+        trim_ts = first_ts
+    else:
+        trim_ts = int(first_ts + (trim_position / stream_length) * (last_ts - first_ts))
 
-        # Continue scanning backwards
-        last_msg_id = messages[-1][0].decode("utf-8")
-        start_id = f"({last_msg_id}"  # Exclusive: continue before this ID
-
-        if len(messages) < batch_size:
-            return None  # Reached beginning without finding target
+    return f"{trim_ts}-0"
 
 
 @task(name="cleanup_redis_streams")
