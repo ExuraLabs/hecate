@@ -40,8 +40,7 @@ def _compute_low_watermark(
 @task(name="cleanup_redis_streams")
 async def cleanup_redis_streams_task() -> None:
     """
-    Trim Redis Stream when memory exceeds threshold, maintaining safety buffer
-    of messages from consumer group watermark.
+    Trim Redis Stream when memory exceeds certain threshold
     """
     logger = get_run_logger()
     redis = Redis.from_url(redis_settings.url)
