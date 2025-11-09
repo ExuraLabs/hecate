@@ -13,6 +13,7 @@ from client import HecateClient
 from config.settings import batch_settings
 from constants import FIRST_SHELLEY_EPOCH
 from flows import get_system_checkpoint
+from flows.stream_cleanup import cleanup_redis_streams_task
 from models import BlockHeight, EpochNumber
 from network import NetworkManager
 from sinks.redis import HistoricalRedisSink
@@ -227,6 +228,8 @@ async def historical_sync_flow(
     concurrent_epochs = concurrent_epochs or cpu_count()
 
     network_manager = NetworkManager()
+
+    cleanup_redis_streams_task.submit()
 
     async with HistoricalRedisSink(start_epoch=start_epoch) as sink:
         last = await sink.get_last_synced_epoch()

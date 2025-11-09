@@ -8,7 +8,6 @@ env_file = ".env.production"  # ".env"
 
 
 class RedisSettings(BaseSettings):
-
     model_config = SettingsConfigDict(
         env_file=env_file, env_file_encoding="utf-8", extra="ignore"
     )
@@ -19,7 +18,6 @@ class RedisSettings(BaseSettings):
 
 
 class BatchSettings(BaseSettings):
-
     model_config = SettingsConfigDict(
         env_file=env_file, env_file_encoding="utf-8", extra="ignore"
     )
