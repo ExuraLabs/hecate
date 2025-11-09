@@ -13,10 +13,10 @@ from client import HecateClient
 from config.settings import batch_settings
 from constants import FIRST_SHELLEY_EPOCH
 from flows import get_system_checkpoint
+from flows.stream_cleanup import cleanup_redis_streams_task
 from models import BlockHeight, EpochNumber
 from network import NetworkManager
 from sinks.redis import HistoricalRedisSink
-from stream_cleanup import cleanup_redis_streams_task
 
 
 def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
