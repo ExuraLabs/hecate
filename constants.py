@@ -26,6 +26,8 @@ with open(Path(__file__).parent / "data/epoch_boundaries.csv", mode="r") as file
 
 FIRST_SHELLEY_EPOCH = EpochNumber(208)
 
+STAKE_CREDENTIAL_DEPOSIT = {"ada": {"lovelace": 2_000_000}}
+
 ERA_BOUNDARY = {  # Slot and hash of the last block of the era. Useful for testing.
     "byron": (
         Slot(4492799),

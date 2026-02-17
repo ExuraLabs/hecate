@@ -11,6 +11,7 @@ INITIAL_DELAY_SECONDS = 80  # Initial grace period for component startup
 WAKE_INTERVAL_SECONDS = 45  # Check interval
 TARGET_MEMORY_GB = 4.5  # Memory threshold to trigger trim
 
+
 def _compute_low_watermark(
     groups_info: list[dict[str, Any]], logger: Logger
 ) -> str | None:
@@ -63,7 +64,7 @@ async def cleanup_redis_streams_task() -> None:
             groups_info = await redis.xinfo_groups(stream_key)
 
             # 3. Calculate low watermark (minimum consumed position)
-            watermark_id = _compute_low_watermark(groups_info, logger)
+            watermark_id = _compute_low_watermark(groups_info, logger)  # type: ignore[arg-type]
 
             if watermark_id is None:
                 continue  # No consumer groups or no consumption
@@ -73,7 +74,7 @@ async def cleanup_redis_streams_task() -> None:
                 stream_key,
                 minid=watermark_id,
                 approximate=True,
-                ref_policy="ACKED"
+                ref_policy="ACKED",
             )
     except asyncio.CancelledError:
         pass  # Expected when flow completes

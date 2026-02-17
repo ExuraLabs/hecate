@@ -2,9 +2,38 @@ import asyncio
 from typing import Any
 
 import ogmios.model.ogmios_model as om
+import ogmios.response_handler as rh
 from ogmios import Block, Direction, NextBlock, Origin, Point, Tip
 
 from client.base import AsyncOgmiosMethod
+from constants import STAKE_CREDENTIAL_DEPOSIT
+
+_CERT_TYPES_NEEDING_DEPOSIT = frozenset(
+    {
+        "stakeCredentialRegistration",
+        "stakeCredentialDeregistration",
+    }
+)
+
+_original_parse_Block = rh.parse_Block
+
+
+def _enriched_parse_Block(resp: dict[str, Any]) -> Block:
+    """Wrap parse_Block to add missing deposit fields to stake credential certificates."""
+    block = _original_parse_Block(resp)
+    transactions = getattr(block, "transactions", None)
+    if not transactions:
+        return block
+    for tx in transactions:
+        for cert in filter(
+            lambda c: c["type"] in _CERT_TYPES_NEEDING_DEPOSIT and "deposit" not in c,
+            tx.get("certificates", ()),
+        ):
+            cert["deposit"] = STAKE_CREDENTIAL_DEPOSIT
+    return block
+
+
+rh.parse_Block = _enriched_parse_Block
 
 
 class AsyncNextBlock(
