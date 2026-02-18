@@ -227,25 +227,26 @@ class HistoricalRedisSink(DataSink):
         epoch = kwargs.pop("epoch")
         last_height = blocks[-1].height
 
-        pipe = self.redis.pipeline(transaction=True)
-
-        # 1) data stream
+        # 1) Write data and event to streams atomically.
+        #    The resume cursor is updated AFTER the pipeline succeeds to avoid
+        #    advancing the checkpoint when the data write fails — Redis MULTI/EXEC
+        #    does not roll back successful commands when a sibling command errors.
         batch_list = [await self._prepare_block(b) for b in blocks]
         payload = json.dumps(batch_list)
+
+        pipe = self.redis.pipeline(transaction=True)
         pipe.xadd(
             self.data_stream,
             {"type": "batch", "epoch": epoch, "data": payload},
-            approximate=True,
         )
-        # 2) event stream
         pipe.xadd(
             self.event_stream,
             {"type": "batch_sent", "epoch": epoch, "height": last_height},
-            approximate=True,
         )
-        # 3) resume cursor
-        pipe.hset(self.resume_map, epoch, last_height)
         await pipe.execute()
+
+        # 2) Only advance the resume cursor after confirming the data was written.
+        await self.redis.hset(self.resume_map, epoch, last_height)
 
         self.logger.debug(f"Sent batch for epoch {epoch}, up to height {last_height}")
 
