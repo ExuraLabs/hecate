@@ -1,9 +1,9 @@
 import time
-from typing import Any
 from multiprocessing import cpu_count
+from typing import Any
 
-from ogmios import Block
 import ogmios.model.model_map as mm
+from ogmios import Block
 from prefect import flow, get_run_logger, task
 from prefect.cache_policies import NO_CACHE
 from prefect.futures import wait
@@ -51,8 +51,9 @@ async def sync_epoch(
     batch_size: int = 1000,
 ) -> EpochNumber:
     """
-    Synchronize a specific epoch by fetching blocks in batches.
-    Uses optimized connection pooling and memory management for maximum performance.
+    Fetch all blocks for an epoch and XADD them directly to the per-epoch
+    Redis stream (``epoch:{N}``). Ordering across epochs is guaranteed by
+    design, as consumers read epoch streams in ascending order.
     """
     logger = get_run_logger()
     epoch_start = time.perf_counter()
@@ -62,21 +63,18 @@ async def sync_epoch(
         HistoricalRedisSink() as sink,
         HecateClient(endpoint_url=endpoint) as client,
     ):
+        # Wipe any stale buffer/resume state so retries always start clean.
+        await sink.reset_epoch_state(epoch)
+
         last_height = await _stream_and_batch_blocks(
             client, sink, epoch, batch_size, logger
         )
 
         if last_height is None:
-            logger.warning(
-                "No blocks processed for epoch %s, cannot mark complete.", epoch
-            )
-            return epoch
-
-        await sink.mark_epoch_complete(epoch, BlockHeight(last_height))
-        logger.info("✅ Epoch %s completed", epoch)
+            raise ValueError("No blocks fetched for epoch %s.", epoch)
 
     epoch_end = time.perf_counter()
-    logger.info("✅ Epoch %s sync complete in %.2fs", epoch, epoch_end - epoch_start)
+    logger.info("✅ Epoch %s fetched in %.2fs", epoch, epoch_end - epoch_start)
     return epoch
 
 
@@ -148,19 +146,12 @@ async def process_batch(
     network_manager: NetworkManager,
 ) -> None:
     """
-    Process a batch of epochs concurrently using sync_epoch tasks.
+    Process a batch of epochs concurrently, then mark them complete in order.
 
-    This function takes a slice of epochs and processes them concurrently
-    using Prefect's task mapping functionality with Dask. It provides progress
-    logging and timing information for each batch.
-
-    Args:
-        total_epochs: Total number of epochs to process across all batches
-        max_concurrent_epochs: Maximum number of epochs to process simultaneously
-        batch_start_index: Starting index in the epoch list for this batch
-        epochs: Complete list of epochs to process
-        batch_size: Number of blocks to process per epoch batch
-        network_manager: NetworkManager instance for managing connections
+    Phase 1 (concurrent): Each epoch task fetches blocks from Ogmios and
+    XADDs them directly to their per-epoch Redis stream.
+    Phase 2 (sequential): Mark each epoch complete in ascending order,
+    advancing ``last_synced_epoch`` atomically.
     """
     logger = get_run_logger()
     batch_start_time = time.perf_counter()
@@ -169,19 +160,34 @@ async def process_batch(
     total_batches = (total_epochs + max_concurrent_epochs - 1) // max_concurrent_epochs
 
     logger.info(
-        "🔄 Starting batch %d/%d: epochs %d to %d",
+        "🟢 Starting batch %d/%d: epochs %d to %d",
         batch_number,
         total_batches,
         batch_epochs[0],
         batch_epochs[-1],
     )
 
+    # Check backpressure before launching workers
+    async with HistoricalRedisSink() as sink:
+        await sink.wait_for_backpressure()
+
+    # Phase 1 — concurrent fetch + direct XADD to per-epoch streams
     batch_endpoints = [network_manager.get_connection() for _ in batch_epochs]
 
     futures = sync_epoch.map(
         epoch=batch_epochs, endpoint=batch_endpoints, batch_size=batch_size
     )
     wait(futures)
+
+    # Phase 2 — mark epochs complete in order
+    async with HistoricalRedisSink() as sink:
+        for epoch in batch_epochs:
+            last_height = await sink.get_epoch_resume_height(epoch)
+            if last_height is None:
+                logger.warning("Epoch %d has no data, skipping", epoch)
+                continue
+
+            await sink.mark_epoch_complete(epoch, last_height)
 
     batch_end_time = time.perf_counter()
     logger.info(

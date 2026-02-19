@@ -9,44 +9,113 @@ from config.settings import redis_settings
 
 INITIAL_DELAY_SECONDS = 80  # Initial grace period for component startup
 WAKE_INTERVAL_SECONDS = 45  # Check interval
-TARGET_MEMORY_GB = 4.5  # Memory threshold to trigger trim
 
 
-def _compute_low_watermark(
-    groups_info: list[dict[str, Any]], logger: Logger
-) -> str | None:
-    """Return minimum last-delivered-id across consumer groups."""
+class RedisKeys:
+    """Encapsulates Redis key naming for epoch streams."""
+
+    _PREFIX = "hecate:history:"
+
+    @classmethod
+    def low_watermark(cls) -> str:
+        return f"{cls._PREFIX}low_watermark"
+
+    @classmethod
+    def last_synced_epoch(cls) -> str:
+        return f"{cls._PREFIX}last_synced_epoch"
+
+    @classmethod
+    def epoch_stream(cls, epoch: int) -> str:
+        return f"{cls._PREFIX}epoch:{epoch}"
+
+
+async def _is_epoch_fully_consumed(
+        redis: Redis, stream_key: str, logger: Logger
+) -> bool:
+    """Return True if all consumer groups have fully consumed the stream.
+
+    A stream is considered fully consumed when:
+    - At least one consumer group exists
+    - Every group has 0 pending entries
+    - Every group's ``last-delivered-id`` equals the stream's ``last-generated-id``
+    """
+    stream_info: dict[str, Any] = await redis.xinfo_stream(stream_key)
+
+    last_generated_id = stream_info.get("last-generated-id", b"0-0")
+    if isinstance(last_generated_id, bytes):
+        last_generated_id = last_generated_id.decode()
+
+    groups_info: list[dict[str, Any]] = await redis.xinfo_groups(stream_key)
+
     if not groups_info:
+        return False
+
+    for group in groups_info:
+        pending = group.get("pending", 0)
+        if pending > 0:
+            return False
+
+        last_delivered = group.get("last-delivered-id", b"0-0")
+        if isinstance(last_delivered, bytes):
+            last_delivered = last_delivered.decode()
+
+        if last_delivered != last_generated_id:
+            return False
+
+    return True
+
+
+async def _get_boundaries(redis: Redis) -> tuple[int, int] | None:
+    """Read low watermark and last synced epoch from Redis.
+
+    Returns:
+        Tuple of (low_watermark, last_synced_epoch) or None if not available.
+    """
+    raw_low = await redis.get(RedisKeys.low_watermark())
+    raw_synced = await redis.get(RedisKeys.last_synced_epoch())
+
+    if raw_low is None or raw_synced is None:
         return None
 
-    delivered_ids = []
+    return int(raw_low), int(raw_synced)
 
-    # Check if any group hasn't started consuming
-    for group in groups_info:
-        if group["last-delivered-id"] == "0-0":
-            logger.warning(
-                "Consumer group '%s' has not consumed any messages "
-                "(last-delivered-id=0-0). Skipping trim to prevent data loss.",
-                group["name"],
+
+async def _cleanup_consumed_epochs(
+        redis: Redis,
+        low_wm: int,
+        last_synced: int,
+        logger: Logger,
+) -> None:
+    """Iterate through epochs and delete fully consumed streams.
+
+    Stops at the first unconsumed epoch because reads are sequential,
+    meaning subsequent epochs are also not consumed yet.
+    """
+    for epoch in range(low_wm, last_synced + 1):
+        stream_key = RedisKeys.epoch_stream(epoch)
+
+        if await _is_epoch_fully_consumed(redis, stream_key, logger):
+            await redis.delete(stream_key)
+            await redis.set(RedisKeys.low_watermark(), epoch + 1)
+            logger.info(
+                "Cleaned up epoch stream %s; low_watermark -> %d",
+                stream_key,
+                epoch + 1,
             )
-            return None
-        delivered_ids.append(group["last-delivered-id"])
-
-    # Low watermark = minimum timestamp among all groups
-    min_timestamp = min(int(sid.split("-")[0]) for sid in delivered_ids)
-
-    return f"{min_timestamp}-0"
+        else:
+            break  # Later epochs are also not fully consumed, so we can stop here
 
 
 @task(name="cleanup_redis_streams")
 async def cleanup_redis_streams_task() -> None:
-    """
-    Trim Redis Stream when memory exceeds certain threshold
+    """Delete fully consumed per-epoch Redis streams and advance low_watermark.
+
+    Iterates epoch streams in ascending order starting from ``low_watermark``.
+    An epoch stream is deleted only when ALL consumer groups have acknowledged
+    every entry.
     """
     logger = get_run_logger()
     redis = Redis.from_url(redis_settings.url)
-    stream_key = "hecate:history:data_stream"
-    target_bytes = int(TARGET_MEMORY_GB * 1024**3)
 
     await asyncio.sleep(INITIAL_DELAY_SECONDS)
 
@@ -54,28 +123,12 @@ async def cleanup_redis_streams_task() -> None:
         while True:
             await asyncio.sleep(WAKE_INTERVAL_SECONDS)
 
-            # 1. Check stream memory usage
-            stream_size_bytes = await redis.memory_usage(stream_key)
+            boundaries = await _get_boundaries(redis)
+            if boundaries is None:
+                continue
 
-            if stream_size_bytes is None or stream_size_bytes < target_bytes:
-                continue  # Stream doesn't exist or below threshold
-
-            # 2. Query consumer groups to get low watermark
-            groups_info = await redis.xinfo_groups(stream_key)
-
-            # 3. Calculate low watermark (minimum consumed position)
-            watermark_id = _compute_low_watermark(groups_info, logger)  # type: ignore[arg-type]
-
-            if watermark_id is None:
-                continue  # No consumer groups or no consumption
-
-            # 4. Execute XTRIM with approximate mode
-            await redis.xtrim(
-                stream_key,
-                minid=watermark_id,
-                approximate=True,
-                ref_policy="ACKED",
-            )
+            low_wm, last_synced = boundaries
+            await _cleanup_consumed_epochs(redis, low_wm, last_synced, logger)  # type: ignore
     except asyncio.CancelledError:
         pass  # Expected when flow completes
     finally:

@@ -3,7 +3,6 @@ import json
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 env_file = ".env.production"  # ".env"
 
 
@@ -15,6 +14,7 @@ class RedisSettings(BaseSettings):
     max_stream_depth: int = Field(alias="REDIS_MAX_STREAM_DEPTH", default=10_000)
     warning_threshold: int = Field(alias="REDIS_WARNING_THRESHOLD", default=7_500)
     check_interval: int = Field(alias="REDIS_CHECK_INTERVAL", default=10)
+    max_unconsumed_epochs: int = Field(alias="REDIS_MAX_UNCONSUMED_EPOCHS", default=10)
 
 
 class BatchSettings(BaseSettings):

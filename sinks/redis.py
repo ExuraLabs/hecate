@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 from typing import Any
 
@@ -8,7 +9,6 @@ from prefect import get_run_logger
 from config.settings import redis_settings
 from constants import FIRST_SHELLEY_EPOCH
 from models import BlockHeight, EpochNumber
-from sinks.backpressure_monitor import RedisBackpressureMonitor
 from sinks.base import DataSink
 
 _redis_module = importlib.import_module("redis.asyncio")
@@ -120,37 +120,19 @@ return redis.call("GET", last_synced_epoch)
 
 class HistoricalRedisSink(DataSink):
     """
-    A Redis‐backed DataSink for reliably streaming and tracking historical epoch data.
+    A Redis‐backed DataSink for reliably streaming historical epoch data.
 
-    This sink writes block batches into a Redis Stream (`<prefix>data_stream`) for downstream
-    consumers and logs control events (batch sent, epoch complete) into a separate Redis Stream
-    (`<prefix>event_stream`). It maintains per‐epoch resume positions in a Redis hash
-    (`<prefix>resume_map`) and tracks completed epochs awaiting sequential commit in a Redis set
-    (`<prefix>ready_set`). A Lua script atomically advances the `last_synced_epoch` counter
-    (`<prefix>last_synced_epoch`) once all preceding epochs are ready, ensuring ordered,
-    at‐least‐once delivery and resumability on failure.
+    Each epoch's block batches are written directly to a dedicated per‐epoch
+    Redis stream (``<prefix>epoch:{N}``). Control events are logged into a
+    separate event stream (``<prefix>event_stream``). Resume positions are
+    tracked in a Redis hash (``<prefix>resume_map``) and completed epochs
+    awaiting sequential commit live in a Redis set (``<prefix>ready_set``).
+    A Lua script atomically advances ``last_synced_epoch`` once all preceding
+    epochs are ready, ensuring ordered, at‐least‐once delivery and
+    resumability on failure.
 
-    Parameters:
-        start_epoch (EpochNumber):
-            The initial epoch boundary; used to initialize `last_synced_epoch` if the key is missing.
-        prefix (str):
-            Redis key namespace prefix (default "hecate:history:").
-
-    Methods:
-        __aenter__ / __aexit__:
-            Manage the Redis connection lifecycle and load the advance‐script.
-        send_batch(epoch, blocks):
-            Atomically push a batch to the data stream with automatic backpressure handling.
-        mark_epoch_complete(epoch) -> EpochNumber:
-            Mark an epoch ready, log the event, and advance `last_synced_epoch` via lua script.
-        get_last_synced_epoch() -> EpochNumber:
-            Retrieve the current `last_synced_epoch` value from Redis, or start_epoch if missing.
-        get_epoch_resume_height(epoch) -> BlockHeight | None:
-            Retrieve the last processed block height for an in‐progress epoch.
-        get_status() -> dict:
-            Return health and progress metrics (e.g. synced epoch, pending counts, connection status).
-        close():
-            Alias for __aexit__; cleanly close the Redis connection.
+    Ordering is guaranteed by construction: each epoch has its own stream,
+    and consumers read streams in ascending epoch order.
     """
 
     def __init__(
@@ -161,18 +143,17 @@ class HistoricalRedisSink(DataSink):
     ):
         self.prefix = prefix
 
-        # Stream of block‐batch payloads:
-        #   • Entries: {"type":"batch", "epoch":<int>, "data":<orjson bytes>}
-        self.data_stream = f"{prefix}data_stream"
+        # Per-epoch stream prefix — each epoch gets its own stream:
+        #   hecate:history:epoch:208, hecate:history:epoch:209, …
+        self.epoch_stream_prefix = f"{prefix}epoch:"
 
         # Stream of audit/control events:
-        #   • Entries: {"type":"batch_sent"|"epoch_complete"|"…", "epoch":<int>, …}
+        #   • Entries: {"type":"epoch_complete", "epoch":<int>, …}
         self.event_stream = f"{prefix}event_stream"
 
-        # Hash (Structure) of in‐progress epochs' resume positions:
+        # Hash of in‐progress epochs' resume positions:
         #   • Field = epoch_number (as string)
         #   • Value = last_processed_block_height (int)
-        #   • Used so that send_batch can resume mid‐epoch on retry.
         self.resume_map = f"{prefix}resume_map"
 
         # Set of epochs that have been fully processed by a worker,
@@ -180,75 +161,64 @@ class HistoricalRedisSink(DataSink):
         # advancing `last_synced_epoch`.
         self.ready_set = f"{prefix}ready_set"
 
-        # String value of the highest epoch N such that *all* epochs
-        # from start through N have been successfully marked complete and synchronized.
+        # Highest epoch N such that *all* epochs from start through N
+        # have been successfully marked complete and synchronized.
         self.last_synced_epoch = f"{prefix}last_synced_epoch"
+
+        # Lowest epoch whose stream still exists in Redis.
+        # Epochs below this have been cleaned up.
+        self.low_watermark = f"{prefix}low_watermark"
 
         self.start_epoch = start_epoch
         self.redis: aioredis.Redis | None = None  # type: ignore
         self._advance_sha: str | None = None
         self.logger = get_run_logger()
-        self.backpressure_monitor: RedisBackpressureMonitor
 
     async def __aenter__(self):
         url = redis_settings.url
         self.redis = aioredis.from_url(url, decode_responses=False)
         self.logger.debug("🔗 Connecting to Redis at %s", url)
 
-        self.backpressure_monitor = RedisBackpressureMonitor(
-            redis_client=self.redis,
-            stream_key=self.data_stream,
-            max_depth=redis_settings.max_stream_depth,
-            check_interval=redis_settings.check_interval,
-        )
-        self.backpressure_monitor.start()
-        self.logger.debug("✅ Backpressure monitor started")
-
         # load our Lua once
         self._advance_sha = await self.redis.script_load(_ADVANCE_EPOCH_LUA)
         self.logger.debug("✅ loaded Lua advance script")
-        # ensure last_synced_epoch exists
+        # ensure last_synced_epoch and low_watermark exist
         await self.redis.setnx(self.last_synced_epoch, self.start_epoch - 1)
+        await self.redis.setnx(self.low_watermark, self.start_epoch)
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        if self.backpressure_monitor:
-            await self.backpressure_monitor.stop()
-            self.logger.debug("🛑 Backpressure monitor stopped")
         if self.redis:
             await self.redis.close()
             self.logger.debug("🛑 Redis connection closed")
 
     async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:
+        """XADD a prepared batch payload directly to the per-epoch Redis stream."""
         assert self.redis, "Not initialized"
-
-        await self.backpressure_monitor.wait_if_paused()
 
         epoch = kwargs.pop("epoch")
         last_height = blocks[-1].height
 
-        # 1) Write data and event to streams atomically.
-        #    The resume cursor is updated AFTER the pipeline succeeds to avoid
-        #    advancing the checkpoint when the data write fails — Redis MULTI/EXEC
-        #    does not roll back successful commands when a sibling command errors.
         batch_list = [await self._prepare_block(b) for b in blocks]
         payload = json.dumps(batch_list)
 
-        pipe = self.redis.pipeline(transaction=True)
-        pipe.xadd(
-            self.data_stream,
-            {"type": "batch", "epoch": epoch, "data": payload},
+        await self.redis.xadd(
+            f"{self.epoch_stream_prefix}{epoch}",
+            {"type": "batch", "epoch": str(epoch), "data": payload},
         )
-        pipe.xadd(
-            self.event_stream,
-            {"type": "batch_sent", "epoch": epoch, "height": last_height},
-        )
-        await pipe.execute()
 
-        # 2) Only advance the resume cursor after confirming the data was written.
+        # Only advance the resume cursor after the XADD is confirmed.
         await self.redis.hset(self.resume_map, epoch, last_height)
 
-        self.logger.debug(f"Sent batch for epoch {epoch}, up to height {last_height}")
+        self.logger.debug("Wrote batch for epoch %s, up to height %s", epoch, last_height)
+
+    async def reset_epoch_state(self, epoch: EpochNumber) -> None:
+        """Clear epoch stream and resume state for an epoch (used before retries)."""
+        assert self.redis, "Not initialized"
+        pipe = self.redis.pipeline(transaction=True)
+        pipe.delete(f"{self.epoch_stream_prefix}{epoch}")
+        pipe.hdel(self.resume_map, epoch)
+        await pipe.execute()
 
     async def mark_epoch_complete(
         self,
@@ -281,7 +251,6 @@ class HistoricalRedisSink(DataSink):
         pipe.xadd(
             self.event_stream,
             {"type": "epoch_complete", "epoch": epoch, "last_height": last_height},
-            approximate=True,
         )
         await pipe.execute()
 
@@ -312,10 +281,36 @@ class HistoricalRedisSink(DataSink):
         val = await self.redis.hget(self.resume_map, epoch)
         return BlockHeight(int(val)) if val else None
 
+    async def get_low_watermark(self) -> EpochNumber:
+        """Get the lowest epoch whose stream still exists in Redis."""
+        assert self.redis, "Not initialized"
+        val = await self.redis.get(self.low_watermark)
+        return EpochNumber(int(val)) if val else self.start_epoch
+
+    async def wait_for_backpressure(self) -> None:
+        """Block until consumers have caught up enough to accept more epoch data.
+
+        Compares ``last_synced_epoch`` against ``low_watermark``. If the gap
+        exceeds ``max_unconsumed_epochs``, sleeps and retries.
+        """
+        while True:
+            last_synced = await self.get_last_synced_epoch()
+            low_wm = await self.get_low_watermark()
+            gap = last_synced - low_wm
+            if gap < redis_settings.max_unconsumed_epochs:
+                return
+            self.logger.warning(
+                "Backpressure: %d unconsumed epochs (limit %d). Waiting…",
+                gap,
+                redis_settings.max_unconsumed_epochs,
+            )
+            await asyncio.sleep(10)
+
     async def get_status(self) -> dict[str, Any]:
         assert self.redis, "Not initialized"
         return {
             "last_synced_epoch": await self.get_last_synced_epoch(),
+            "low_watermark": await self.get_low_watermark(),
             "epochs_individually_completed_pending_sync": await self.redis.scard(
                 self.ready_set
             ),
