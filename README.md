@@ -62,7 +62,7 @@ Hecate consists of:
 1. **Ogmios Client** - Asynchronous client for the Ogmios WebSocket API
 2. **Data Relay** - Efficiently forward blockchain data with minimal transformation
 3. **Prefect Flows** - Orchestrate historical and real-time data fetching
-4. **Redis Integration** - Buffer transactions or send them as they come
+4. **Redis Integration** - Stream block data to downstream consumers via per-epoch Redis streams
 
 ## Features
 
