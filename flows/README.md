@@ -13,7 +13,7 @@ The historical sync flow efficiently retrieves and processes past blockchain dat
 #### Execution
 
 ```bash
-uv run python -m flows.historical --start-epoch=208 --batch-size=1000
+uv run python -m flows.historical --start-epoch=208 --end-epoch=210 --batch-size=1000
 ```
 
 #### How It Works
@@ -50,6 +50,7 @@ uv run python -m flows.historical --start-epoch=208 --batch-size=1000
 #### Relevant Configuration
 
 - `start_epoch`: Initial epoch to sync
+- `end_epoch`: Optional upper-bound epoch (inclusive); defaults to system checkpoint
 - `batch_size`: Block batch size per epoch
 - `concurrent_epochs`: Number of epochs to process in parallel (defaults to CPU count)
 - `REDIS_MAX_UNCONSUMED_EPOCHS`: Backpressure threshold (default: 10)
@@ -98,6 +99,7 @@ Both flows leverage Prefect's task-based execution model:
 #### Configuration Options
 
 - `start_epoch`: First epoch to sync (defaults to first Shelley epoch)
+- `end_epoch`: Optional upper-bound epoch (inclusive); defaults to system checkpoint
 - `batch_size`: Number of blocks to process in each batch (default: 500)
 - `concurrent_epochs`: CPU cores to utilize for parallel epoch processing (default: available cores)
 

@@ -30,7 +30,9 @@ class RedisKeys:
 
 
 async def _is_epoch_fully_consumed(
-        redis: Redis, stream_key: str, logger: Logger
+    redis: Redis,
+    stream_key: str,
+    logger: Logger,
 ) -> bool:
     """Return True if all consumer groups have fully consumed the stream.
 
@@ -81,10 +83,10 @@ async def _get_boundaries(redis: Redis) -> tuple[int, int] | None:
 
 
 async def _cleanup_consumed_epochs(
-        redis: Redis,
-        low_wm: int,
-        last_synced: int,
-        logger: Logger,
+    redis: Redis,
+    low_wm: int,
+    last_synced: int,
+    logger: Logger,
 ) -> None:
     """Iterate through epochs and delete fully consumed streams.
 

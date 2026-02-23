@@ -205,6 +205,7 @@ async def process_batch(
 async def historical_sync_flow(
     *,
     start_epoch: EpochNumber = FIRST_SHELLEY_EPOCH,
+    end_epoch: EpochNumber | None = None,
     batch_size: int | None = None,
     concurrent_epochs: int | None = None,
 ) -> None:
@@ -220,6 +221,10 @@ async def historical_sync_flow(
 
     :param start_epoch: The starting epoch for synchronization. Defaults to FIRST_SHELLEY_EPOCH.
     :type start_epoch: EpochNumber
+    :param end_epoch: Optional upper-bound epoch (inclusive). When provided, sync stops
+     at this epoch instead of the system checkpoint. Clamped to the system checkpoint
+     if it exceeds available boundary data.
+    :type end_epoch: EpochNumber | None
     :param batch_size: The number of blocks processed per batch for synchronization.
      Defaults to BASE_BATCH_SIZE from settings (typically 1000 in production).
     :type batch_size: int | None
@@ -246,7 +251,19 @@ async def historical_sync_flow(
         )
         start_epoch = EpochNumber(last + 1)
 
-    target = get_system_checkpoint()
+    checkpoint = get_system_checkpoint()
+    if end_epoch is not None:
+        if end_epoch > checkpoint:
+            logger.warning(
+                "end_epoch %d exceeds system checkpoint %d — clamping to %d",
+                end_epoch,
+                checkpoint,
+                checkpoint,
+            )
+            end_epoch = checkpoint
+        target = end_epoch
+    else:
+        target = checkpoint
     epochs = [EpochNumber(e) for e in range(start_epoch, target + 1)]
     total_epochs = len(epochs)
 

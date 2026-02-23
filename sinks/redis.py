@@ -210,7 +210,9 @@ class HistoricalRedisSink(DataSink):
         # Only advance the resume cursor after the XADD is confirmed.
         await self.redis.hset(self.resume_map, epoch, last_height)
 
-        self.logger.debug("Wrote batch for epoch %s, up to height %s", epoch, last_height)
+        self.logger.debug(
+            "Wrote batch for epoch %s, up to height %s", epoch, last_height
+        )
 
     async def reset_epoch_state(self, epoch: EpochNumber) -> None:
         """Clear epoch stream and resume state for an epoch (used before retries)."""
