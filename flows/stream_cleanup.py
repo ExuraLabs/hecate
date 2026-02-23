@@ -94,9 +94,21 @@ async def _cleanup_consumed_epochs(
     meaning subsequent epochs are also not consumed yet.  The
     ``last_synced`` epoch stream is always retained so that
     ``low_watermark`` never exceeds ``last_synced_epoch``.
+
+    Streams that no longer exist (e.g. cleaned up by a prior run) are
+    skipped and the watermark is advanced past them.
     """
     for epoch in range(low_wm, last_synced):
         stream_key = RedisKeys.epoch_stream(epoch)
+
+        if not await redis.exists(stream_key):
+            await redis.set(RedisKeys.low_watermark(), epoch + 1)
+            logger.debug(
+                "Epoch stream %s already removed; low_watermark -> %d",
+                stream_key,
+                epoch + 1,
+            )
+            continue
 
         if await _is_epoch_fully_consumed(redis, stream_key, logger):
             await redis.delete(stream_key)
@@ -137,7 +149,7 @@ async def cleanup_redis_streams_task(target_epoch: int | None = None) -> None:
             low_wm, last_synced = boundaries
             await _cleanup_consumed_epochs(redis, low_wm, last_synced, logger)  # type: ignore
 
-            if target_epoch is not None and low_wm > target_epoch:
+            if target_epoch is not None and low_wm >= target_epoch:
                 logger.info(
                     "All streams up to target epoch %d cleaned up, exiting",
                     target_epoch,
