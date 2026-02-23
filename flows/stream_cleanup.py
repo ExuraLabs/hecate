@@ -109,12 +109,15 @@ async def _cleanup_consumed_epochs(
 
 
 @task(name="cleanup_redis_streams")
-async def cleanup_redis_streams_task() -> None:
+async def cleanup_redis_streams_task(target_epoch: int | None = None) -> None:
     """Delete fully consumed per-epoch Redis streams and advance low_watermark.
 
     Iterates epoch streams in ascending order starting from ``low_watermark``.
     An epoch stream is deleted only when ALL consumer groups have acknowledged
     every entry.
+
+    :param target_epoch: When provided, the task exits once ``low_watermark``
+     has advanced past this epoch (i.e. all produced streams are cleaned up).
     """
     logger = get_run_logger()
     redis = Redis.from_url(redis_settings.url)
@@ -131,6 +134,13 @@ async def cleanup_redis_streams_task() -> None:
 
             low_wm, last_synced = boundaries
             await _cleanup_consumed_epochs(redis, low_wm, last_synced, logger)  # type: ignore
+
+            if target_epoch is not None and low_wm > target_epoch:
+                logger.info(
+                    "All streams up to target epoch %d cleaned up, exiting",
+                    target_epoch,
+                )
+                break
     except asyncio.CancelledError:
         pass  # Expected when flow completes
     finally:

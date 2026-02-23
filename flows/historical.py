@@ -240,8 +240,6 @@ async def historical_sync_flow(
 
     network_manager = NetworkManager()
 
-    cleanup_redis_streams_task.submit()
-
     async with HistoricalRedisSink(start_epoch=start_epoch) as sink:
         last = await sink.get_last_synced_epoch()
 
@@ -264,6 +262,9 @@ async def historical_sync_flow(
         target = end_epoch
     else:
         target = checkpoint
+
+    cleanup_redis_streams_task.submit(target_epoch=target)
+
     epochs = [EpochNumber(e) for e in range(start_epoch, target + 1)]
     total_epochs = len(epochs)
 
