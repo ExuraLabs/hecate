@@ -91,9 +91,11 @@ async def _cleanup_consumed_epochs(
     """Iterate through epochs and delete fully consumed streams.
 
     Stops at the first unconsumed epoch because reads are sequential,
-    meaning subsequent epochs are also not consumed yet.
+    meaning subsequent epochs are also not consumed yet.  The
+    ``last_synced`` epoch stream is always retained so that
+    ``low_watermark`` never exceeds ``last_synced_epoch``.
     """
-    for epoch in range(low_wm, last_synced + 1):
+    for epoch in range(low_wm, last_synced):
         stream_key = RedisKeys.epoch_stream(epoch)
 
         if await _is_epoch_fully_consumed(redis, stream_key, logger):
