@@ -289,6 +289,40 @@ class HistoricalRedisSink(DataSink):
         val = await self.redis.get(self.low_watermark)
         return EpochNumber(int(val)) if val else self.start_epoch
 
+    async def purge_stale_streams(self, up_to_epoch: EpochNumber) -> int:
+        """Delete epoch streams below ``up_to_epoch`` and advance ``low_watermark``.
+
+        Called at flow startup to remove orphaned streams left by prior
+        overlapping runs whose consumers have already moved past them.
+        Without this, streams with 0 consumer groups block backpressure
+        indefinitely.
+
+        Returns the number of streams purged.
+        """
+        assert self.redis, "Not initialized"
+        low_wm = await self.get_low_watermark()
+
+        if low_wm >= up_to_epoch:
+            return 0
+
+        pipe = self.redis.pipeline(transaction=True)
+        for epoch in range(low_wm, up_to_epoch):
+            pipe.delete(f"{self.epoch_stream_prefix}{epoch}")
+            pipe.hdel(self.resume_map, epoch)
+            pipe.srem(self.ready_set, epoch)
+        pipe.set(self.low_watermark, up_to_epoch)
+        await pipe.execute()
+
+        purged = up_to_epoch - low_wm
+        self.logger.info(
+            "Purged %d stale epoch stream(s) (%d–%d); low_watermark → %d",
+            purged,
+            low_wm,
+            up_to_epoch - 1,
+            up_to_epoch,
+        )
+        return purged
+
     async def wait_for_backpressure(self) -> None:
         """Block until consumers have caught up enough to accept more epoch data.
 

@@ -249,6 +249,12 @@ async def historical_sync_flow(
         )
         start_epoch = EpochNumber(last + 1)
 
+    # Purge orphaned epoch streams below start_epoch from prior overlapping runs.
+    # Without this, streams that no consumer will ever read (0 consumer groups)
+    # block backpressure indefinitely.
+    async with HistoricalRedisSink() as sink:
+        await sink.purge_stale_streams(start_epoch)
+
     checkpoint = get_system_checkpoint()
     if end_epoch is not None:
         if end_epoch > checkpoint:
