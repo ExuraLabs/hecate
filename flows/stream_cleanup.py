@@ -2,7 +2,6 @@ import asyncio
 from logging import Logger
 from typing import Any
 
-from prefect import get_run_logger, task
 from redis.asyncio import Redis
 
 from config.settings import redis_settings
@@ -122,18 +121,27 @@ async def _cleanup_consumed_epochs(
             break  # Later epochs are also not fully consumed, so we can stop here
 
 
-@task(name="cleanup_redis_streams")
-async def cleanup_redis_streams_task(target_epoch: int | None = None) -> None:
+async def cleanup_streams_loop(
+    target_epoch: int | None = None,
+    logger: Logger | None = None,
+) -> None:
     """Delete fully consumed per-epoch Redis streams and advance low_watermark.
 
     Iterates epoch streams in ascending order starting from ``low_watermark``.
     An epoch stream is deleted only when ALL consumer groups have acknowledged
     every entry.
 
-    :param target_epoch: When provided, the task exits once ``low_watermark``
+    Designed to run as a background ``asyncio.Task`` alongside the main sync
+    work.  Handles ``CancelledError`` so the caller can cancel it cleanly
+    when the flow completes.
+
+    :param target_epoch: When provided, the loop exits once ``low_watermark``
      has advanced past this epoch (i.e. all produced streams are cleaned up).
+    :param logger: Logger instance. Falls back to module-level logger if not provided.
     """
-    logger = get_run_logger()
+    import logging
+
+    logger = logger or logging.getLogger(__name__)
     redis = Redis.from_url(redis_settings.url)
 
     await asyncio.sleep(INITIAL_DELAY_SECONDS)
@@ -147,7 +155,7 @@ async def cleanup_redis_streams_task(target_epoch: int | None = None) -> None:
                 continue
 
             low_wm, last_synced = boundaries
-            await _cleanup_consumed_epochs(redis, low_wm, last_synced, logger)  # type: ignore
+            await _cleanup_consumed_epochs(redis, low_wm, last_synced, logger)
 
             if target_epoch is not None and low_wm >= target_epoch:
                 logger.info(
@@ -156,6 +164,6 @@ async def cleanup_redis_streams_task(target_epoch: int | None = None) -> None:
                 )
                 break
     except asyncio.CancelledError:
-        pass  # Expected when flow completes
+        logger.info("Cleanup loop cancelled — flow complete")
     finally:
         await redis.close()

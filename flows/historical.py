@@ -1,3 +1,4 @@
+import asyncio
 import time
 from multiprocessing import cpu_count
 from typing import Any
@@ -13,7 +14,7 @@ from client import HecateClient
 from config.settings import batch_settings
 from constants import FIRST_SHELLEY_EPOCH
 from flows import get_system_checkpoint
-from flows.stream_cleanup import cleanup_redis_streams_task
+from flows.stream_cleanup import cleanup_streams_loop
 from models import BlockHeight, EpochNumber
 from network import NetworkManager
 from sinks.redis import HistoricalRedisSink
@@ -269,8 +270,6 @@ async def historical_sync_flow(
     else:
         target = checkpoint
 
-    cleanup_redis_streams_task.submit(target_epoch=target)
-
     epochs = [EpochNumber(e) for e in range(start_epoch, target + 1)]
     total_epochs = len(epochs)
 
@@ -284,16 +283,24 @@ async def historical_sync_flow(
         concurrent_epochs,
     )
 
-    # Process epochs in batches
-    for batch_start_index in range(0, total_epochs, concurrent_epochs):
-        await process_batch(
-            total_epochs,
-            concurrent_epochs,
-            batch_start_index,
-            epochs,
-            batch_size,
-            network_manager,
-        )
+    # Run stream cleanup as a background asyncio task (not a Prefect task),
+    # so it doesn't block the flow from completing when consumers are slow.
+    cleanup = asyncio.create_task(
+        cleanup_streams_loop(target_epoch=target, logger=logger)  # type: ignore[arg-type]
+    )
+
+    try:
+        for batch_start_index in range(0, total_epochs, concurrent_epochs):
+            await process_batch(
+                total_epochs,
+                concurrent_epochs,
+                batch_start_index,
+                epochs,
+                batch_size,
+                network_manager,
+            )
+    finally:
+        cleanup.cancel()
 
     flow_end = time.perf_counter()
     elapsed_time = flow_end - flow_start
