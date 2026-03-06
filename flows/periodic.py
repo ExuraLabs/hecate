@@ -57,12 +57,15 @@ def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
     base_url = "https://adastat.net/api/rest/v1/search.json?query="
     previous_boundaries = EPOCH_BOUNDARIES[previous_epoch]
 
+    session = requests.Session()
+    session.headers['User-Agent'] = "Chrome/133.0.0.0"
+    
     start_height = BlockHeight(previous_boundaries.end_height + 1)
-    response = requests.get(f"{base_url}{start_height}")
+    response = session.get(f"{base_url}{start_height}")
     start_slot, start_hash = parse_response(response, start_height)
 
     end_height = BlockHeight(start_height + BLOCKS_IN_EPOCH[epoch] - 1)
-    response = requests.get(f"{base_url}{end_height}")
+    response = session.get(f"{base_url}{end_height}")
     end_slot, end_hash = parse_response(response, end_height)
 
     result = EpochData(
