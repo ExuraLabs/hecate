@@ -58,8 +58,8 @@ def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
     previous_boundaries = EPOCH_BOUNDARIES[previous_epoch]
 
     session = requests.Session()
-    session.headers['User-Agent'] = "Chrome/133.0.0.0"
-    
+    session.headers["User-Agent"] = "Chrome/133.0.0.0"
+
     start_height = BlockHeight(previous_boundaries.end_height + 1)
     response = session.get(f"{base_url}{start_height}")
     start_slot, start_hash = parse_response(response, start_height)

@@ -1,10 +1,10 @@
 import asyncio
 from logging import Logger
-from typing import Any
 
 from redis.asyncio import Redis
 
 from config.settings import redis_settings
+from sinks.redis import is_stream_fully_consumed
 
 INITIAL_DELAY_SECONDS = 80  # Initial grace period for component startup
 WAKE_INTERVAL_SECONDS = 45  # Check interval
@@ -33,37 +33,11 @@ async def _is_epoch_fully_consumed(
     stream_key: str,
     logger: Logger,
 ) -> bool:
-    """Return True if all consumer groups have fully consumed the stream.
+    """Delegate to the shared ``is_stream_fully_consumed`` helper.
 
-    A stream is considered fully consumed when:
-    - At least one consumer group exists
-    - Every group has 0 pending entries
-    - Every group's ``last-delivered-id`` equals the stream's ``last-generated-id``
+    The ``logger`` parameter is kept for call-site compatibility.
     """
-    stream_info: dict[str, Any] = await redis.xinfo_stream(stream_key)
-
-    last_generated_id = stream_info.get("last-generated-id", b"0-0")
-    if isinstance(last_generated_id, bytes):
-        last_generated_id = last_generated_id.decode()
-
-    groups_info: list[dict[str, Any]] = await redis.xinfo_groups(stream_key)
-
-    if not groups_info:
-        return False
-
-    for group in groups_info:
-        pending = group.get("pending", 0)
-        if pending > 0:
-            return False
-
-        last_delivered = group.get("last-delivered-id", b"0-0")
-        if isinstance(last_delivered, bytes):
-            last_delivered = last_delivered.decode()
-
-        if last_delivered != last_generated_id:
-            return False
-
-    return True
+    return await is_stream_fully_consumed(redis, stream_key)
 
 
 async def _get_boundaries(redis: Redis) -> tuple[int, int] | None:

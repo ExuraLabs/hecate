@@ -15,6 +15,39 @@ _redis_module = importlib.import_module("redis.asyncio")
 aioredis = _redis_module
 
 
+async def is_stream_fully_consumed(
+    redis: Any,
+    stream_key: str,
+) -> bool:
+    """Return True if all consumer groups have fully consumed the stream.
+
+    A stream is considered fully consumed when:
+    - At least one consumer group exists
+    - Every group has 0 pending entries
+    - Every group's ``last-delivered-id`` equals the stream's ``last-generated-id``
+    """
+    stream_info: dict[str, Any] = await redis.xinfo_stream(stream_key)
+    last_generated = stream_info.get("last-generated-id", b"0-0")
+    if isinstance(last_generated, bytes):
+        last_generated = last_generated.decode()
+
+    groups: list[dict[str, Any]] = await redis.xinfo_groups(stream_key)
+    if not groups:
+        return False
+
+    for group in groups:
+        pending = group.get("pending", 0)
+        if pending > 0:
+            return False
+        last_delivered = group.get("last-delivered-id", b"0-0")
+        if isinstance(last_delivered, bytes):
+            last_delivered = last_delivered.decode()
+        if last_delivered != last_generated:
+            return False
+
+    return True
+
+
 class RedisSink(DataSink):
     def __init__(
         self,
@@ -293,9 +326,11 @@ class HistoricalRedisSink(DataSink):
         """Delete epoch streams below ``up_to_epoch`` and advance ``low_watermark``.
 
         Called at flow startup to remove orphaned streams left by prior
-        overlapping runs whose consumers have already moved past them.
-        Without this, streams with 0 consumer groups block backpressure
-        indefinitely.
+        overlapping runs. Only purges streams that are safe to delete:
+        missing, orphaned (no consumer groups), or fully consumed.
+
+        Raises ``RuntimeError`` if any stream has unconsumed data with active
+        consumer groups — prevents silent data loss.
 
         Returns the number of streams purged.
         """
@@ -304,6 +339,9 @@ class HistoricalRedisSink(DataSink):
 
         if low_wm >= up_to_epoch:
             return 0
+
+        for epoch in range(low_wm, up_to_epoch):
+            await self._assert_safe_to_purge(epoch)
 
         pipe = self.redis.pipeline(transaction=True)
         for epoch in range(low_wm, up_to_epoch):
@@ -322,6 +360,32 @@ class HistoricalRedisSink(DataSink):
             up_to_epoch,
         )
         return purged
+
+    async def _assert_safe_to_purge(self, epoch: int) -> None:
+        """Raise if the epoch stream has unconsumed data.
+
+        Safe to purge when the stream is missing, has no consumer groups
+        (orphaned), or is fully consumed. Anything else means a consumer
+        still needs this data.
+        """
+        assert self.redis, "Not initialized"
+        stream_key = f"{self.epoch_stream_prefix}{epoch}"
+
+        if not await self.redis.exists(stream_key):
+            return
+
+        groups: list[dict[str, Any]] = await self.redis.xinfo_groups(stream_key)
+        if not groups:
+            return
+
+        if await is_stream_fully_consumed(self.redis, stream_key):
+            return
+
+        raise RuntimeError(
+            f"Cannot purge epoch {epoch}: stream {stream_key} has unconsumed "
+            f"data with {len(groups)} active consumer group(s). "
+            f"Let consumers finish, or FLUSHDB to start from scratch."
+        )
 
     async def wait_for_backpressure(self) -> None:
         """Block until consumers have caught up enough to accept more epoch data.
