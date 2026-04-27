@@ -12,6 +12,55 @@ compute rates.
 Every public coroutine is best-effort: a Redis hiccup on a metric write
 is logged at warning level and swallowed so it can never break the
 producer.
+
+==========================================================================
+Wire format (consumed by the pipeline dashboard)
+==========================================================================
+
+For the historical flow, ``prefix == "hecate:history:"``. All values
+below are stored as Redis bulk strings (bytes); decode as UTF-8.
+
+``hecate:history:metrics`` (HSET, snapshot/counter)
+    blocks_total                int   monotonic; XADDed blocks across all
+                                      workers. Differentiate over time
+                                      for blocks/sec.
+    epochs_total                int   monotonic; epochs marked complete.
+                                      Differentiate for epochs/min.
+    last_heartbeat_ts           ISO8601 UTC; written every 1s while the
+                                      historical flow is alive. Absence
+                                      > ~10s ⇒ "PRODUCER DOWN".
+    backpressure_paused         "0" | "1"; "1" while the producer is
+                                      blocked waiting on consumer lag.
+                                      Written only on real pause/resume
+                                      edges, not every poll.
+    backpressure_paused_since   ISO8601 UTC at the moment paused→1; ""
+                                      otherwise.
+    workers_active              int   workers in flight for the current
+                                      batch (held through phase-2
+                                      mark-complete; drops to 0 between
+                                      batches).
+    workers_max                 int   configured ceiling
+                                      (`concurrent_epochs`).
+    last_cleanup_at             ISO8601 UTC of the most recent cleanup
+                                      pass (every 45s after a 80s warmup).
+    streams_purged_total        int   monotonic; per-epoch streams
+                                      deleted by the cleanup loop.
+
+``hecate:history:epoch:{N}:meta`` (HSET, per-epoch, written at completion
+                                   except bytes_total which accumulates
+                                   per batch during XADD)
+    bytes_total                 int   sum of XADD payload bytes (orjson
+                                      of the batch list). Proxy for
+                                      "how heavy was this epoch".
+    first_xadd_ts_ms            int   millisecond prefix of the epoch
+                                      stream's first XADD ID — producer
+                                      wallclock when batch 1 landed.
+    last_xadd_ts_ms             int   …same, for the last XADD. Diff
+                                      with first → produce duration.
+
+The ``:meta`` hash is deleted atomically with the corresponding epoch
+stream by both purge paths, so the dashboard should treat its disappearance
+as "the producer let this one go" rather than "lost data".
 """
 
 import asyncio
