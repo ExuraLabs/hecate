@@ -11,12 +11,13 @@ from prefect.futures import wait
 from prefect.task_runners import ProcessPoolTaskRunner
 
 from client import HecateClient
-from config.settings import batch_settings
+from config.settings import batch_settings, redis_settings
 from constants import FIRST_SHELLEY_EPOCH
 from flows import get_system_checkpoint
 from flows.stream_cleanup import cleanup_streams_loop
 from models import BlockHeight, EpochNumber
 from network import NetworkManager
+from sinks.metrics import heartbeat
 from sinks.redis import HistoricalRedisSink
 
 
@@ -171,6 +172,11 @@ async def process_batch(
     # Check backpressure before launching workers
     async with HistoricalRedisSink() as sink:
         await sink.wait_for_backpressure()
+        assert sink.metrics
+        await sink.metrics.note_workers_busy(
+            active=len(batch_epochs),
+            maximum=max_concurrent_epochs,
+        )
 
     # Phase 1 — concurrent fetch + direct XADD to per-epoch streams
     batch_endpoints = [network_manager.get_connection() for _ in batch_epochs]
@@ -178,7 +184,8 @@ async def process_batch(
     futures = sync_epoch.map(
         epoch=batch_epochs, endpoint=batch_endpoints, batch_size=batch_size
     )
-    wait(futures)
+    # `wait` is sync-blocking; off-loop it so the heartbeat task keeps firing.
+    await asyncio.to_thread(wait, futures)
 
     # Phase 2 — mark epochs complete in order
     async with HistoricalRedisSink() as sink:
@@ -189,6 +196,9 @@ async def process_batch(
                 continue
 
             await sink.mark_epoch_complete(epoch, last_height)
+
+        assert sink.metrics
+        await sink.metrics.note_workers_idle()
 
     batch_end_time = time.perf_counter()
     logger.info(
@@ -243,6 +253,7 @@ async def historical_sync_flow(
 
     async with HistoricalRedisSink(start_epoch=start_epoch) as sink:
         last = await sink.get_last_synced_epoch()
+        sink_prefix = sink.prefix
 
     if last > start_epoch:
         logger.info(
@@ -290,15 +301,16 @@ async def historical_sync_flow(
     )
 
     try:
-        for batch_start_index in range(0, total_epochs, concurrent_epochs):
-            await process_batch(
-                total_epochs,
-                concurrent_epochs,
-                batch_start_index,
-                epochs,
-                batch_size,
-                network_manager,
-            )
+        async with heartbeat(redis_settings.url, sink_prefix):
+            for batch_start_index in range(0, total_epochs, concurrent_epochs):
+                await process_batch(
+                    total_epochs,
+                    concurrent_epochs,
+                    batch_start_index,
+                    epochs,
+                    batch_size,
+                    network_manager,
+                )
     finally:
         cleanup.cancel()
 

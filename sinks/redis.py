@@ -10,6 +10,7 @@ from config.settings import redis_settings
 from constants import FIRST_SHELLEY_EPOCH
 from models import BlockHeight, EpochNumber
 from sinks.base import DataSink
+from sinks.metrics import MetricsClient, epoch_meta_key
 
 _redis_module = importlib.import_module("redis.asyncio")
 aioredis = _redis_module
@@ -204,12 +205,14 @@ class HistoricalRedisSink(DataSink):
 
         self.start_epoch = start_epoch
         self.redis: aioredis.Redis | None = None  # type: ignore
+        self.metrics: MetricsClient | None = None
         self._advance_sha: str | None = None
         self.logger = get_run_logger()
 
     async def __aenter__(self):
         url = redis_settings.url
         self.redis = aioredis.from_url(url, decode_responses=False)
+        self.metrics = MetricsClient(self.redis, self.prefix, self.logger)
         self.logger.debug("🔗 Connecting to Redis at %s", url)
 
         # load our Lua once
@@ -242,6 +245,13 @@ class HistoricalRedisSink(DataSink):
 
         # Only advance the resume cursor after the XADD is confirmed.
         await self.redis.hset(self.resume_map, epoch, last_height)
+
+        assert self.metrics
+        await self.metrics.record_batch_written(
+            epoch=epoch,
+            block_count=len(blocks),
+            payload_bytes=len(payload),
+        )
 
         self.logger.debug(
             "Wrote batch for epoch %s, up to height %s", epoch, last_height
@@ -298,6 +308,13 @@ class HistoricalRedisSink(DataSink):
             self.resume_map,
         )
         last_synced = EpochNumber(int(latest_epoch))
+
+        assert self.metrics
+        await self.metrics.record_epoch_published(
+            epoch=epoch,
+            stream_key=f"{self.epoch_stream_prefix}{epoch}",
+        )
+
         self.logger.info(
             "Epoch %s marked complete; last_synced_epoch → %s",
             epoch,
@@ -346,6 +363,7 @@ class HistoricalRedisSink(DataSink):
         pipe = self.redis.pipeline(transaction=True)
         for epoch in range(low_wm, up_to_epoch):
             pipe.delete(f"{self.epoch_stream_prefix}{epoch}")
+            pipe.delete(epoch_meta_key(self.prefix, epoch))
             pipe.hdel(self.resume_map, epoch)
             pipe.srem(self.ready_set, epoch)
         pipe.set(self.low_watermark, up_to_epoch)
@@ -387,24 +405,39 @@ class HistoricalRedisSink(DataSink):
             f"Let consumers finish, or FLUSHDB to start from scratch."
         )
 
+    async def _consumer_lag(self) -> int:
+        """Epochs published but not yet consumed (``last_synced - low_watermark``)."""
+        last_synced = await self.get_last_synced_epoch()
+        low_wm = await self.get_low_watermark()
+        return last_synced - low_wm
+
     async def wait_for_backpressure(self) -> None:
         """Block until consumers have caught up enough to accept more epoch data.
 
-        Compares ``last_synced_epoch`` against ``low_watermark``. If the gap
-        exceeds ``max_unconsumed_epochs``, sleeps and retries.
+        Pauses when consumer lag reaches ``max_unconsumed_epochs``. Logs +
+        publishes the pause edge once; subsequent polls just sleep. The
+        resume edge is published in ``finally`` so it fires on any exit.
         """
-        while True:
-            last_synced = await self.get_last_synced_epoch()
-            low_wm = await self.get_low_watermark()
-            gap = last_synced - low_wm
-            if gap < redis_settings.max_unconsumed_epochs:
-                return
-            self.logger.warning(
-                "Backpressure: %d unconsumed epochs (limit %d). Waiting…",
-                gap,
-                redis_settings.max_unconsumed_epochs,
-            )
-            await asyncio.sleep(10)
+        assert self.metrics, "Not initialized"
+        paused = False
+        try:
+            while (
+                lag := await self._consumer_lag()
+            ) >= redis_settings.max_unconsumed_epochs:
+                if paused:
+                    await asyncio.sleep(10)
+                    continue
+                paused = True
+                await self.metrics.note_backpressure_pause()
+                self.logger.warning(
+                    "Backpressure: %d unconsumed epochs (limit %d). Waiting…",
+                    lag,
+                    redis_settings.max_unconsumed_epochs,
+                )
+                await asyncio.sleep(10)
+        finally:
+            if paused:
+                await self.metrics.note_backpressure_resume()
 
     async def get_status(self) -> dict[str, Any]:
         assert self.redis, "Not initialized"

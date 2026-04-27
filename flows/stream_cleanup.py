@@ -4,6 +4,7 @@ from logging import Logger
 from redis.asyncio import Redis
 
 from config.settings import redis_settings
+from sinks.metrics import MetricsClient, epoch_meta_key
 from sinks.redis import is_stream_fully_consumed
 
 INITIAL_DELAY_SECONDS = 80  # Initial grace period for component startup
@@ -26,6 +27,10 @@ class RedisKeys:
     @classmethod
     def epoch_stream(cls, epoch: int) -> str:
         return f"{cls._PREFIX}epoch:{epoch}"
+
+    @classmethod
+    def epoch_meta(cls, epoch: int) -> str:
+        return epoch_meta_key(cls._PREFIX, epoch)
 
 
 async def _is_epoch_fully_consumed(
@@ -57,6 +62,7 @@ async def _get_boundaries(redis: Redis) -> tuple[int, int] | None:
 
 async def _cleanup_consumed_epochs(
     redis: Redis,
+    metrics: MetricsClient,
     low_wm: int,
     last_synced: int,
     logger: Logger,
@@ -84,8 +90,9 @@ async def _cleanup_consumed_epochs(
             continue
 
         if await _is_epoch_fully_consumed(redis, stream_key, logger):
-            await redis.delete(stream_key)
+            await redis.delete(stream_key, RedisKeys.epoch_meta(epoch))
             await redis.set(RedisKeys.low_watermark(), epoch + 1)
+            await metrics.note_stream_purged()
             logger.info(
                 "Cleaned up epoch stream %s; low_watermark -> %d",
                 stream_key,
@@ -117,6 +124,7 @@ async def cleanup_streams_loop(
 
     logger = logger or logging.getLogger(__name__)
     redis = Redis.from_url(redis_settings.url)
+    metrics = MetricsClient(redis, RedisKeys._PREFIX, logger)
 
     await asyncio.sleep(INITIAL_DELAY_SECONDS)
 
@@ -129,7 +137,8 @@ async def cleanup_streams_loop(
                 continue
 
             low_wm, last_synced = boundaries
-            await _cleanup_consumed_epochs(redis, low_wm, last_synced, logger)
+            await _cleanup_consumed_epochs(redis, metrics, low_wm, last_synced, logger)
+            await metrics.note_cleanup_pass()
 
             if target_epoch is not None and low_wm >= target_epoch:
                 logger.info(
