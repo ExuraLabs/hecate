@@ -33,7 +33,7 @@ deployments:
           GIT_AUTHOR_EMAIL: "bot@exura.org"
           GIT_COMMITTER_NAME: "Prefect Bot"
           GIT_COMMITTER_EMAIL: "bot@exura.org"
-    schedule:
+    schedules:
       - cron: 0 0 * * *
         timezone: UTC
         day_or: true
