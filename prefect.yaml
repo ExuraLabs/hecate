@@ -28,7 +28,7 @@ deployments:
       work_queue_name: periodic
       job_variables:
         env:
-          GITHUB_TOKEN: "{{ prefect.blocks.secret.github-token }}"
+          GITHUB_TOKEN: "{{ prefect.blocks.secret.exura-github-token }}"
           GIT_AUTHOR_NAME: "Prefect Bot"
           GIT_AUTHOR_EMAIL: "bot@exura.org"
           GIT_COMMITTER_NAME: "Prefect Bot"
