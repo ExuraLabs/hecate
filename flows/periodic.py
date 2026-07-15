@@ -13,8 +13,13 @@ from prefect import task, flow
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
 from models import BlockHash, BlockHeight, EpochData, EpochNumber, Slot
 
+# Koios/AdaStat occasionally return transient 5xx errors (e.g. PGRST003
+# connection-pool timeouts), so fetching tasks retry with backoff.
+RETRY_DELAY_SECONDS: list[float] = [10, 30, 60, 120]
+REQUEST_TIMEOUT = 30
 
-@task
+
+@task(retries=len(RETRY_DELAY_SECONDS), retry_delay_seconds=RETRY_DELAY_SECONDS)
 def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
     """
     Gets the `EpochData` of a given epoch from constants if the values are known;
@@ -61,11 +66,11 @@ def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
     session.headers["User-Agent"] = "Chrome/133.0.0.0"
 
     start_height = BlockHeight(previous_boundaries.end_height + 1)
-    response = session.get(f"{base_url}{start_height}")
+    response = session.get(f"{base_url}{start_height}", timeout=REQUEST_TIMEOUT)
     start_slot, start_hash = parse_response(response, start_height)
 
     end_height = BlockHeight(start_height + BLOCKS_IN_EPOCH[epoch] - 1)
-    response = session.get(f"{base_url}{end_height}")
+    response = session.get(f"{base_url}{end_height}", timeout=REQUEST_TIMEOUT)
     end_slot, end_hash = parse_response(response, end_height)
 
     result = EpochData(
@@ -81,7 +86,7 @@ def get_epoch_boundaries(epoch: EpochNumber) -> EpochData:
     return result
 
 
-@task
+@task(retries=len(RETRY_DELAY_SECONDS), retry_delay_seconds=RETRY_DELAY_SECONDS)
 def get_epoch_blocks(epoch: EpochNumber) -> int:
     """
     Get the number of blocks produced in an epoch from constants if the values are known;
@@ -105,12 +110,13 @@ def get_epoch_blocks(epoch: EpochNumber) -> int:
         )
 
     base_url = "https://api.koios.rest/api/v1/epoch_info?_epoch_no="
-    response = requests.get(f"{base_url}{epoch}")
+    response = requests.get(f"{base_url}{epoch}", timeout=REQUEST_TIMEOUT)
     result = parse_response(response)
     BLOCKS_IN_EPOCH[epoch] = result
     return result
 
 
+@task(retries=len(RETRY_DELAY_SECONDS), retry_delay_seconds=RETRY_DELAY_SECONDS)
 def get_current_epoch() -> EpochNumber:
     """
     Get the current epoch from the Koios API.
@@ -129,7 +135,7 @@ def get_current_epoch() -> EpochNumber:
         )
 
     base_url = "https://api.koios.rest/api/v1/tip"
-    response = requests.get(base_url)
+    response = requests.get(base_url, timeout=REQUEST_TIMEOUT)
     return parse_response(response)
 
 
