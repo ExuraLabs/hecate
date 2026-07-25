@@ -181,3 +181,6 @@ GEMINI.md
 
 # Prompts local
 prompt.md
+
+# Local epoch-boundary cache (derived at runtime; see epoch_cache.py)
+data/epoch_cache.json

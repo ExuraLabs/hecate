@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 from multiprocessing import cpu_count
 from typing import Any
@@ -12,13 +13,20 @@ from prefect.task_runners import ProcessPoolTaskRunner
 
 from client import HecateClient
 from config.settings import batch_settings, redis_settings
-from constants import FIRST_SHELLEY_EPOCH
-from flows import get_system_checkpoint
+from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES, FIRST_SHELLEY_EPOCH
+from epoch_cache import extend_cache, load_cache
+from epoch_derivation import regenerate_range
 from flows.stream_cleanup import cleanup_streams_loop
-from models import BlockHeight, EpochNumber
+from models import BlockHeight, EpochData, EpochNumber
 from network import NetworkManager
 from sinks.metrics import heartbeat
 from sinks.redis import HistoricalRedisSink
+
+# Optional kupo endpoint to accelerate on-demand derivation of epochs missing
+# from the committed CSVs; without it the derivation falls back to a chain-sync
+# walk. On-demand derivation is a rare self-heal path — the committed data is
+# normally kept current by the periodic flow.
+KUPO_URL = os.getenv("KUPO_URL")
 
 
 def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
@@ -51,11 +59,17 @@ async def sync_epoch(
     epoch: EpochNumber,
     endpoint: str,
     batch_size: int = 1000,
+    previous_boundary: EpochData | None = None,
+    block_count: int | None = None,
 ) -> EpochNumber:
     """
     Fetch all blocks for an epoch and XADD them directly to the per-epoch
     Redis stream (``epoch:{N}``). Ordering across epochs is guaranteed by
     design, as consumers read epoch streams in ascending order.
+
+    ``previous_boundary`` and ``block_count`` carry the epoch's boundary data
+    explicitly so worker processes need not read it from the committed CSVs —
+    this is what lets on-demand-derived epochs be streamed.
     """
     logger = get_run_logger()
     epoch_start = time.perf_counter()
@@ -69,7 +83,7 @@ async def sync_epoch(
         await sink.reset_epoch_state(epoch)
 
         last_height = await _stream_and_batch_blocks(
-            client, sink, epoch, batch_size, logger
+            client, sink, epoch, batch_size, logger, previous_boundary, block_count
         )
 
         if last_height is None:
@@ -91,6 +105,8 @@ async def _stream_and_batch_blocks(
     epoch: EpochNumber,
     batch_size: int,
     run_logger: Any,
+    previous_boundary: EpochData | None = None,
+    block_count: int | None = None,
 ) -> int | None:
     """
     Stream blocks from the client and process them in optimized batches.
@@ -113,7 +129,9 @@ async def _stream_and_batch_blocks(
     last_height: int | None = None
     resume_height = await sink.get_epoch_resume_height(epoch)
 
-    async for blocks in client.epoch_blocks(epoch):
+    async for blocks in client.epoch_blocks(
+        epoch, previous_boundary=previous_boundary, block_count=block_count
+    ):
         for block in blocks:
             if _should_skip(block, resume_height):
                 continue
@@ -146,6 +164,8 @@ async def process_batch(
     epochs: list[EpochNumber],
     batch_size: int,
     network_manager: NetworkManager,
+    boundaries: dict[EpochNumber, EpochData],
+    counts: dict[EpochNumber, int],
 ) -> None:
     """
     Process a batch of epochs concurrently, then mark them complete in order.
@@ -182,7 +202,11 @@ async def process_batch(
     batch_endpoints = [network_manager.get_connection() for _ in batch_epochs]
 
     futures = sync_epoch.map(
-        epoch=batch_epochs, endpoint=batch_endpoints, batch_size=batch_size
+        epoch=batch_epochs,
+        endpoint=batch_endpoints,
+        batch_size=batch_size,
+        previous_boundary=[boundaries[EpochNumber(e - 1)] for e in batch_epochs],
+        block_count=[counts[e] for e in batch_epochs],
     )
     # `wait` is sync-blocking; off-loop it so the heartbeat task keeps firing.
     await asyncio.to_thread(wait, futures)
@@ -209,6 +233,71 @@ async def process_batch(
     )
 
 
+async def _resolve_target_and_boundaries(
+    start_epoch: EpochNumber,
+    end_epoch: EpochNumber | None,
+    endpoint: str,
+    logger: Any,
+) -> tuple[EpochNumber, dict[EpochNumber, EpochData], dict[EpochNumber, int]]:
+    """Determine the seed target from the live chain and assemble boundary data.
+
+    The target is the last finalized epoch (the current open epoch minus one),
+    read live from Ogmios rather than a checkpoint file — so a stale checkout can
+    no longer silently clamp the seed range. Epochs beyond the frozen bootstrap
+    CSVs and the local cache are derived from the chain on demand (kupo-accelerated
+    when KUPO_URL is set, otherwise a pure chain-sync walk) and cached for reuse.
+
+    Returns the target epoch plus boundary rows and block counts keyed by epoch,
+    covering ``[start_epoch - 1, target]``.
+    """
+    boundaries: dict[EpochNumber, EpochData] = dict(EPOCH_BOUNDARIES)
+    counts: dict[EpochNumber, int] = {
+        EpochNumber(e): c for e, c in BLOCKS_IN_EPOCH.items()
+    }
+    # Layer the local cache of previously derived epochs over the frozen CSVs.
+    cached_boundaries, cached_counts = load_cache()
+    boundaries.update(cached_boundaries)
+    counts.update(cached_counts)
+
+    async with HecateClient(endpoint_url=endpoint) as client:
+        current, _ = await client.epoch.execute()
+        last_finalized = EpochNumber(current - 1)
+
+        if end_epoch is not None and end_epoch > last_finalized:
+            logger.warning(
+                "end_epoch %d exceeds last finalized epoch %d — clamping to %d",
+                end_epoch,
+                last_finalized,
+                last_finalized,
+            )
+        target = (
+            last_finalized
+            if end_epoch is None
+            else EpochNumber(min(end_epoch, last_finalized))
+        )
+
+        highest_cached = max(boundaries)
+        if target > highest_cached:
+            logger.info(
+                "Deriving epochs %d..%d absent from the committed CSVs",
+                highest_cached + 1,
+                target,
+            )
+            new_rows, new_counts = await regenerate_range(
+                client,
+                EpochNumber(highest_cached + 1),
+                target,
+                boundaries[highest_cached],
+                kupo_url=KUPO_URL,
+            )
+            boundaries.update(new_rows)
+            counts.update(new_counts)
+            # Persist the newly derived tail so the next run reuses it.
+            extend_cache(new_rows, new_counts)
+
+    return target, boundaries, counts
+
+
 @flow(
     name="Historical Sync",
     task_runner=ProcessPoolTaskRunner(max_workers=cpu_count()),  # type: ignore[arg-type]
@@ -233,8 +322,8 @@ async def historical_sync_flow(
     :param start_epoch: The starting epoch for synchronization. Defaults to FIRST_SHELLEY_EPOCH.
     :type start_epoch: EpochNumber
     :param end_epoch: Optional upper-bound epoch (inclusive). When provided, sync stops
-     at this epoch instead of the system checkpoint. Clamped to the system checkpoint
-     if it exceeds available boundary data.
+     at this epoch instead of the last finalized epoch. Clamped to the last finalized
+     epoch (current open epoch − 1) if it exceeds it.
     :type end_epoch: EpochNumber | None
     :param batch_size: The number of blocks processed per batch for synchronization.
      Defaults to BASE_BATCH_SIZE from settings (typically 1000 in production).
@@ -267,19 +356,9 @@ async def historical_sync_flow(
     async with HistoricalRedisSink() as sink:
         await sink.purge_stale_streams(start_epoch)
 
-    checkpoint = get_system_checkpoint()
-    if end_epoch is not None:
-        if end_epoch > checkpoint:
-            logger.warning(
-                "end_epoch %d exceeds system checkpoint %d — clamping to %d",
-                end_epoch,
-                checkpoint,
-                checkpoint,
-            )
-            end_epoch = checkpoint
-        target = end_epoch
-    else:
-        target = checkpoint
+    target, boundaries, counts = await _resolve_target_and_boundaries(
+        start_epoch, end_epoch, network_manager.get_connection(), logger
+    )
 
     epochs = [EpochNumber(e) for e in range(start_epoch, target + 1)]
     total_epochs = len(epochs)
@@ -310,6 +389,8 @@ async def historical_sync_flow(
                     epochs,
                     batch_size,
                     network_manager,
+                    boundaries,
+                    counts,
                 )
     finally:
         cleanup.cancel()
