@@ -1,6 +1,5 @@
 # Hecate 🔮 <img align="right" width="200" height="200" src=".github/assets/hecate_logo.png">
 
-[![Current Epoch](https://img.shields.io/badge/dynamic/json?logo=cardano&url=https://raw.githubusercontent.com/ExuraLabs/hecate/master/flows/checkpoint.json&query=$.epoch&label=Epoch&color=blue)](https://github.com/ExuraLabs/hecate/actions/workflows/auto-pr-epoch-updates.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg?logo=python)](https://www.python.org/downloads/release/python-3120/)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 [![Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg?logo=ruff)](https://github.com/astral-sh/ruff)
@@ -34,10 +33,10 @@ While its main use case is to forward data via Redis, it can also be configured 
 │         ▲            │  │Sync Flow │ │Sync Flow│  │     │ │Sink    │       │  │
 │         │            │  └──────────┘ └─────────┘  │     │ └────────┘       │  │
 │         │            │                            │     │ ┌────────┐       │  │
-│         │            │  ┌─────────────────┐       │     │ │CLI     │       │  │
-│         │            │  │Periodic         │       │     │ │Sink    │       │  │
-│         │            │  │Flows            │       │     │ └────────┘       │  │
-│         │            │  └─────────────────┘       │     │                  │  │
+│         │            │                            │     │ │CLI     │       │  │
+│         │            │                            │     │ │Sink    │       │  │
+│         │            │                            │     │ └────────┘       │  │
+│         │            │                            │     │                  │  │
 │         │            │                            │     │                  │  │
 │         │            └────────────────────────────┘     └──────────────────┘  │
 │         │                        │                             │              │
@@ -83,12 +82,16 @@ uv run python -m demo
 
 ## Prefect Flows 🔄
 
-Hecate uses [Prefect](https://www.prefect.io/) to orchestrate both historical and real-time data
-flows:
+Hecate uses [Prefect](https://www.prefect.io/) to orchestrate historical backfill:
 
-- **Historical Sync**: Efficiently backfill all on-chain history in a resumable, concurrent manner
-- **Periodic Tasks**: Automatically update epoch metadata and other system constants
+- **Historical Sync**: Efficiently backfill on-chain history in a resumable, concurrent manner
 - **[See detailed flows documentation](flows/README.md)**
+
+Epoch boundaries and block counts are derived directly from the chain over the
+same Ogmios connection used for streaming (see `epoch_derivation.py`), with an
+optional [kupo](https://github.com/CardanoSolutions/kupo) endpoint to accelerate
+boundary lookups. The committed `data/*.csv` are only a frozen bootstrap anchor
+index; epochs past it are derived on demand and cached locally.
 
 ## Installation
 
@@ -125,11 +128,10 @@ uv sync --all-groups
 ```
 hecate/
 ├── client/           # Ogmios WebSocket client
-├── data/             # Constant historical data
+├── data/             # Frozen bootstrap epoch-boundary data
 ├── flows/            # Prefect flow definitions
-│   ├── historical    # Historical synchronization flows
-│   ├── periodic      # Periodic flows for data updates
-│   └── realtime      # Real-time synchronization flows
+│   └── historical    # Historical synchronization flow
+├── epoch_derivation  # Derive epoch boundaries from the chain
 ├── sinks/            # Data sinks
 │   ├── redis/        # Redis sink for downstream service(s)
 │   └── cli/          # CLI sink for command line output
@@ -165,5 +167,4 @@ This project builds on the [ogmios-python](https://gitlab.com/viperscience/ogmio
 
 - [Ogmios](https://github.com/CardanoSolutions/ogmios) - WebSocket bridge that wraps Ouroboros' mini-protocols
 - [ogmios-python](https://gitlab.com/viperscience/ogmios-python) - Original Python SDK for Ogmios
-- [Koios](https://koios.rest/) - Distributed and open-source Cardano API
-- [AdaStat](https://adastat.net/) - Advanced Cardano blockchain explorer and query layer
+- [kupo](https://github.com/CardanoSolutions/kupo) - Fast, lightweight chain-index used to accelerate epoch-boundary lookups
