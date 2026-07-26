@@ -7,11 +7,15 @@ from rich.panel import Panel
 from rich.pretty import Pretty
 from rich.table import Table
 
-from sinks.base import DataSink
 
+class CLISink:
+    """A pretty CLI data sink using rich.
 
-class CLISink(DataSink):
-    """A pretty CLI data sink using rich"""
+    Structurally implements ``sinks.base.DataSink`` — the zero-dependency
+    relay target, useful for eyeballing a range without a Redis in the
+    picture. It carries no ``EpochCoordinator`` surface, so a backfill
+    against it has no resumability and no backpressure.
+    """
 
     def __init__(self, max_history: int = 5):
         """Initialize console and history tracking"""
@@ -26,11 +30,17 @@ class CLISink(DataSink):
             "start_time": datetime.now(),
         }
 
+    async def __aenter__(self) -> "CLISink":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        await self.close()
+
     async def send_block(self, block: Block) -> None:
         """Print a single block to the console"""
         self._update_stats(block)
         self._store_in_history(block)
-        block_data = await self._prepare_block(block)
+        block_data = self._summarize(block)
 
         self.console.print(
             Panel.fit(
@@ -100,9 +110,13 @@ class CLISink(DataSink):
         if len(self.last_blocks) > self.max_history:
             self.last_blocks.pop(0)
 
-    @classmethod
-    async def _prepare_block(cls, block: Block) -> dict[str, Any]:
-        """Prepare a block for sending to the sink"""
+    @staticmethod
+    def _summarize(block: Block) -> dict[str, Any]:
+        """Condense a block to the handful of fields worth printing.
+
+        Deliberately *not* ``sinks.base.prepare_block`` — this is a
+        human-readable summary for a terminal, not the relay wire format.
+        """
         return {
             "hash": block.id,
             "slot": block.slot,
