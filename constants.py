@@ -5,11 +5,11 @@ from models import BlockHash, EpochData, EpochNumber, Slot
 
 # The CSVs below are a *frozen* bootstrap anchor index: a snapshot of epoch
 # boundaries and block counts through the epoch they were last regenerated at.
-# They are no longer maintained by any flow — epochs past the snapshot are derived
-# from the chain on demand (see epoch_derivation.py) and cached locally
-# (epoch_cache.py). The snapshot only spares a cold, kupo-less start from walking
-# the chain for already-known epochs; regenerate it with `verify_epoch_data
-# --repair` if a fresher bootstrap is ever wanted.
+# Nothing maintains them — epochs past the snapshot are derived from the chain on
+# demand (see epoch_derivation.py) and cached locally (epoch_cache.py). The
+# snapshot only spares a cold, kupo-less start from walking the chain for
+# already-known epochs; `epoch_derivation.regenerate_range` is what would build
+# a fresher one.
 BLOCKS_IN_EPOCH: dict[int, int]
 
 with open(Path(__file__).parent / "data/epoch_blocks.csv", mode="r") as file:
