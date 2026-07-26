@@ -1,7 +1,7 @@
 # Hecate Flows
 
-Hecate uses [Prefect](https://www.prefect.io/) to orchestrate data flows and periodic tasks. This
-document covers the available flows, their configuration options, and usage patterns.
+Hecate uses [Prefect](https://www.prefect.io/) to orchestrate historical backfill. This
+document covers the flow, its configuration options, and usage patterns.
 
 ## Flow Types
 
@@ -50,7 +50,7 @@ uv run python -m flows.historical --start-epoch=208 --end-epoch=210 --batch-size
 #### Relevant Configuration
 
 - `start_epoch`: Initial epoch to sync
-- `end_epoch`: Optional upper-bound epoch (inclusive); defaults to system checkpoint
+- `end_epoch`: Optional upper-bound epoch (inclusive); defaults to the last finalized epoch
 - `batch_size`: Block batch size per epoch
 - `concurrent_epochs`: Number of epochs to process in parallel (defaults to CPU count)
 - `REDIS_MAX_UNCONSUMED_EPOCHS`: Backpressure threshold (default: 10)
@@ -67,40 +67,27 @@ uv run python -m flows.historical --start-epoch=208 --end-epoch=210 --batch-size
 
 ---
 
-### Periodic Flow
+### Epoch Data
 
-The periodic flow automatically updates epoch boundaries, block counts, and other system constants:
+Epoch boundaries (per-epoch start/end block height, slot, hash) and block counts
+are derived directly from the chain over Ogmios (`epoch_derivation.py`), using an
+optional kupo endpoint (`KUPO_URL`) to accelerate boundary lookups. The historical
+flow reads the last finalized epoch live from Ogmios and derives any epoch beyond
+the frozen `data/*.csv` bootstrap on demand, caching the result locally
+(`epoch_cache.py`; path configurable via `HECATE_EPOCH_CACHE`).
+
+Verify the bootstrap CSVs against the chain, or regenerate a row, with:
 
 ```bash
-# Run periodic flow to update epoch data
-uv run python -m flows.periodic
+uv run python -m verify_epoch_data --verify          # prove the table vs chain
+uv run python -m verify_epoch_data --repair <EPOCH>  # regenerate a row
 ```
-
-#### Features
-
-- **Automated Updates**: Fetches new epoch data from Koios and AdaStat APIs
-- **Data Persistence**: Updates local CSV files with new information
-- **Git Integration**: Optionally commits and pushes changes to a designated branch
-- **Self-Managing**: Only updates when new epochs are available
-
-#### Configuration Options
-
-- `GITHUB_TOKEN`: Environment variable for GitHub authentication
-- Updates are tracked in `flows/checkpoint.json`
 
 ## Flow Architecture
 
-Both flows leverage Prefect's task-based execution model:
+The flow leverages Prefect's task-based execution model:
 
 1. **Tasks**: Atomic units of work with defined inputs, outputs, and error handling
 2. **Flow**: Orchestrates tasks, managing dependencies and execution order
-3. **State**: Tracks progress and enables resumability on failure
-
-#### Configuration Options
-
-- `start_epoch`: First epoch to sync (defaults to first Shelley epoch)
-- `end_epoch`: Optional upper-bound epoch (inclusive); defaults to system checkpoint
-- `batch_size`: Number of blocks to process in each batch (default: 500)
-- `concurrent_epochs`: CPU cores to utilize for parallel epoch processing (default: available cores)
-
+3. **State**: Tracks progress and enables resumability on failure (in Redis)
 ```

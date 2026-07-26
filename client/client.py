@@ -13,7 +13,7 @@ from websockets.protocol import State
 from client.chainsync import AsyncFindIntersection, AsyncNextBlock
 from client.ledgerstate import AsyncEpoch, AsyncEraSummaries, AsyncTip
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES
-from models import EpochNumber
+from models import EpochData, EpochNumber
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +119,12 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         return resp
 
     async def epoch_blocks(
-        self, epoch: EpochNumber, request_id: Any = None
+        self,
+        epoch: EpochNumber,
+        request_id: Any = None,
+        *,
+        previous_boundary: EpochData | None = None,
+        block_count: int | None = None,
     ) -> AsyncIterator[list[Block]]:
         """
         Get blocks produced on the given epoch.
@@ -129,11 +134,17 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         The blocks are guaranteed to be unique and sorted by height in ascending order.
         :param epoch: The epoch to get blocks from
         :param request_id: The prefix to send in request IDs
+        :param previous_boundary: EpochData for ``epoch - 1``; falls back to the
+            committed EPOCH_BOUNDARIES when not supplied. Pass explicitly to stream
+            epochs derived on demand (not present in the committed CSVs).
+        :param block_count: Number of blocks in ``epoch``; falls back to the
+            committed BLOCKS_IN_EPOCH when not supplied.
         """
         # Intersect the end of the previous epoch so we can start streaming the expected one
-        previous_epoch = EPOCH_BOUNDARIES[EpochNumber(epoch - 1)]
+        if previous_boundary is None:
+            previous_boundary = EPOCH_BOUNDARIES[EpochNumber(epoch - 1)]
         intersection_point = Point(
-            slot=previous_epoch.end_slot, id=previous_epoch.end_hash
+            slot=previous_boundary.end_slot, id=previous_boundary.end_hash
         )
         intersection, tip, request_id = await self.find_intersection.execute(
             points=[intersection_point],
@@ -145,7 +156,9 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
             )
 
         # If we got here, the epoch blocks are available, so we can start fetching them
-        remaining_blocks = BLOCKS_IN_EPOCH[epoch]
+        remaining_blocks = (
+            block_count if block_count is not None else BLOCKS_IN_EPOCH[epoch]
+        )
         expected_height = None
         last_height = None
         while remaining_blocks > 0:
