@@ -10,7 +10,6 @@ dependencies = [
     "requests>=2.32.3",
     "rich>=14.0.0",
     "typer>=0.19.2",
-    "uvloop>=0.21.0",
 ]
 
 [dependency-groups]
