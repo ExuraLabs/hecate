@@ -33,7 +33,7 @@ from ogmios import Block
 
 from client import HecateClient
 from config.log import configure_logging
-from config.settings import batch_settings
+from config import settings
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES, FIRST_SHELLEY_EPOCH
 from epoch_cache import extend_cache, load_cache
 from epoch_derivation import regenerate_range
@@ -446,7 +446,7 @@ async def backfill(
         succeeded are committed first, so a rerun resumes cleanly.
     """
     run_start = time.perf_counter()
-    batch_size = batch_size or batch_settings.batch_size
+    batch_size = batch_size or settings.BATCH_SIZE
     concurrency = concurrency or cpu_count()
     network_manager = NetworkManager(endpoints)
 

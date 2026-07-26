@@ -8,7 +8,7 @@ from typing import Any
 import orjson as json
 from ogmios import Block
 
-from config.settings import redis_settings
+from config import settings
 from constants import FIRST_SHELLEY_EPOCH
 from models import BlockHeight, EpochNumber
 from sinks.base import prepare_block
@@ -47,7 +47,7 @@ class RedisSink:
         **redis_kwargs: Any,
     ):
         """Connect to ``url``, defaulting to ``REDIS_URL`` from the environment."""
-        self.redis = aioredis.from_url(url or redis_settings.url, **redis_kwargs)
+        self.redis = aioredis.from_url(url or settings.REDIS_URL, **redis_kwargs)
         self.prefix = prefix
         self.block_queue = f"{self.prefix}blocks"
         self.status_key = f"{self.prefix}status"
@@ -176,7 +176,7 @@ class HistoricalRedisSink:
         self.logger = logger or logging.getLogger(__name__)
 
     async def __aenter__(self) -> "HistoricalRedisSink":
-        url = redis_settings.url
+        url = settings.REDIS_URL
         self.redis = aioredis.from_url(
             url,
             decode_responses=False,
@@ -393,7 +393,7 @@ class HistoricalRedisSink:
         try:
             while (
                 lag := await self._consumer_lag()
-            ) >= redis_settings.max_unconsumed_epochs:
+            ) >= settings.REDIS_MAX_UNCONSUMED_EPOCHS:
                 if paused:
                     await asyncio.sleep(10)
                     continue
@@ -402,7 +402,7 @@ class HistoricalRedisSink:
                 self.logger.warning(
                     "Backpressure: %d unconsumed epochs (limit %d). Waiting…",
                     lag,
-                    redis_settings.max_unconsumed_epochs,
+                    settings.REDIS_MAX_UNCONSUMED_EPOCHS,
                 )
                 await asyncio.sleep(10)
         finally:
@@ -441,7 +441,7 @@ class HistoricalRedisSink:
             )
         )
         try:
-            async with heartbeat(redis_settings.url, self.prefix):
+            async with heartbeat(settings.REDIS_URL, self.prefix):
                 yield
         finally:
             cleanup.cancel()

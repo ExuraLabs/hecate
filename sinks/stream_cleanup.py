@@ -10,7 +10,7 @@ from typing import Any
 
 from redis.asyncio import Redis
 
-from config.settings import redis_settings
+from config import settings
 from sinks.metrics import MetricsClient, epoch_meta_key
 
 INITIAL_DELAY_SECONDS = 80  # Initial grace period for component startup
@@ -151,7 +151,7 @@ async def cleanup_streams_loop(
     """
     logger = logger or logging.getLogger(__name__)
     keys = EpochStreamKeys(prefix)
-    redis = Redis.from_url(redis_settings.url)
+    redis = Redis.from_url(settings.REDIS_URL)
     metrics = MetricsClient(redis, prefix, logger)
 
     try:
