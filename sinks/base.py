@@ -1,25 +1,153 @@
 from collections import deque
-from typing import Any, Protocol, TypeVar
+from contextlib import AbstractAsyncContextManager
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from ogmios import Block
 
-from models import Slot
+from models import BlockHeight, EpochNumber, Slot
 
 
-class DataSink(Protocol):
-    """Protocol defining the interface for any data sink used by Hecate"""
+def prepare_block(block: Block) -> dict[str, Any]:
+    """Serialize a block to the wire format every sink relays.
 
-    @classmethod
-    async def _prepare_block(cls, block: Block) -> dict[str, Any]:
-        """Prepare a block for sending to the sink"""
+    Sends the whole block minus the fields no downstream consumer needs:
+    the pydantic schema handle, the issuer, and per-transaction datums,
+    scripts and redeemers. ``hash`` and ``slot`` are emitted first so the
+    two fields consumers key on stay at the head of the payload.
+
+    Module-level rather than a sink method: the format is a property of
+    Hecate's output contract, not of any one sink.
+    """
+    block_data: dict[str, Any] = {"slot": -1, "hash": block.id}
+
+    filtered_block_fields = ("_schematype", "issuer", "id")
+    block_data |= {
+        field: value
+        for field, value in block.__dict__.items()
+        if field not in filtered_block_fields
+        and field != "transactions"  # Handled next
+    }
+
+    filtered_tx_fields = ("datums", "scripts", "redeemers")
+    block_data["transactions"] = [
+        {field: value for field, value in tx.items() if field not in filtered_tx_fields}
+        for tx in block.transactions
+    ]
+
+    return block_data
+
+
+class BlockRelay(Protocol):
+    """The narrow surface ``backfill()`` needs from a sink.
+
+    This is the whole contract for relaying blocks somewhere. A third
+    party integrating Hecate implements ``send_batch`` plus the async
+    context manager and is done — everything else in this module is
+    optional extra credit.
+    """
+
+    async def __aenter__(self) -> "BlockRelay": ...
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any, /) -> None: ...
+
+    async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:
+        """Send a batch of blocks to the sink."""
         ...
+
+
+@runtime_checkable
+class EpochCoordinator(BlockRelay, Protocol):
+    """The ordering/durability surface, layered on top of a relay.
+
+    A sink that implements this additionally owns *where the backfill is*:
+    resume positions, ordered epoch completion, consumer backpressure and
+    the lifecycle of already-published data. ``backfill()`` detects it at
+    runtime (``isinstance``) and stays fully functional without it — a
+    coordinator-less sink simply gets every block of every requested
+    epoch, with no resumability and no flow control.
+    """
+
+    async def ensure_ordering_base(self, base: EpochNumber) -> EpochNumber:
+        """Seed the ordering base if untouched, and report the one in force.
+
+        The base is where ordered completion starts counting from. An
+        existing one is returned unchanged rather than overwritten: only the
+        caller knows whether it matches the window about to be relayed, and
+        a mismatch is not something a sink may paper over.
+        """
+        ...
+
+    async def reset_ordering_base(self, base: EpochNumber) -> None:
+        """Move the base, dropping any claim that earlier epochs were sent.
+
+        A deliberate act of scope-narrowing, not a repair — call it only when
+        the epochs being written off are genuinely out of scope.
+        """
+        ...
+
+    async def get_last_synced_epoch(self) -> EpochNumber | None:
+        """Highest epoch N with every epoch through N completed.
+
+        None when nothing has been delivered yet. This is the value
+        consumers bound their reads by.
+        """
+        ...
+
+    async def get_epoch_resume_height(self, epoch: EpochNumber) -> BlockHeight | None:
+        """Height already relayed for an in-progress epoch, if any."""
+        ...
+
+    async def reset_epoch_state(self, epoch: EpochNumber) -> None:
+        """Discard partial state for an epoch, so a retry starts clean."""
+        ...
+
+    async def mark_epoch_complete(
+        self, epoch: EpochNumber, last_height: BlockHeight
+    ) -> EpochNumber:
+        """Publish an epoch as complete; returns the new last-synced epoch."""
+        ...
+
+    async def purge_stale_streams(
+        self, up_to_epoch: EpochNumber, *, purge_orphans: bool = False
+    ) -> int:
+        """Reclaim published data below ``up_to_epoch`` that is finished with.
+
+        Must refuse — not delete — anything a consumer could still be owed.
+        ``purge_orphans`` opts into dropping data no consumer has registered
+        for, which is otherwise indistinguishable from data whose consumer has
+        not started yet.
+        """
+        ...
+
+    async def wait_for_backpressure(self) -> None:
+        """Block until consumers can accept more data."""
+        ...
+
+    async def note_batch_started(self, *, active: int, maximum: int) -> None:
+        """Record that a concurrent batch of epochs is in flight."""
+        ...
+
+    async def note_batch_finished(self) -> None:
+        """Record that no epoch workers are running."""
+        ...
+
+    def run_bookkeeping(
+        self, *, target_epoch: EpochNumber
+    ) -> AbstractAsyncContextManager[None]:
+        """Run this sink's own background upkeep for the duration of the body.
+
+        Whatever the sink needs kept alive alongside a backfill —
+        liveness signalling, reclaiming already-consumed data — without
+        the backfill needing to know what any of it is.
+        """
+        ...
+
+
+class DataSink(BlockRelay, Protocol):
+    """A fuller sink: batches, single blocks, status and teardown."""
 
     async def send_block(self, block: Block) -> None:
         """Send a block to the sink"""
-        ...
-
-    async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:
-        """Send a batch of blocks to the sink"""
         ...
 
     async def get_status(self) -> dict[str, Any]:

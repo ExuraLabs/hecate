@@ -1,72 +1,89 @@
 import asyncio
 import importlib
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
+from enum import Enum, auto
 from typing import Any
 
 import orjson as json
 from ogmios import Block
-from prefect import get_run_logger
 
-from config.settings import redis_settings
-from constants import FIRST_SHELLEY_EPOCH
+from config import settings
+from errors import UnsafePurgeError
 from models import BlockHeight, EpochNumber
-from sinks.base import DataSink
-from sinks.metrics import MetricsClient, epoch_meta_key
+from sinks.base import prepare_block
+from sinks.metrics import MetricsClient, epoch_meta_key, heartbeat
+from sinks.stream_cleanup import cleanup_streams_loop, is_stream_fully_consumed
 
 _redis_module = importlib.import_module("redis.asyncio")
 aioredis = _redis_module
 
 
-async def is_stream_fully_consumed(
-    redis: Any,
-    stream_key: str,
-) -> bool:
-    """Return True if all consumer groups have fully consumed the stream.
+class _StreamState(Enum):
+    """What the startup purge found for one epoch."""
 
-    A stream is considered fully consumed when:
-    - At least one consumer group exists
-    - Every group has 0 pending entries
-    - Every group's ``last-delivered-id`` equals the stream's ``last-generated-id``
+    ABSENT = auto()  # nothing there; the usual case below a window
+    CONSUMED = auto()  # every registered group acknowledged everything
+    ORPHANED = auto()  # holds data, but no group registered — see purge_orphans
+
+
+def _summarize_epochs(epochs: list[int]) -> str:
+    """Render epoch numbers compactly, collapsing runs into ranges."""
+    if not epochs:
+        return "none"
+    spans: list[tuple[int, int]] = []
+    for epoch in epochs:
+        if spans and epoch == spans[-1][1] + 1:
+            spans[-1] = (spans[-1][0], epoch)
+        else:
+            spans.append((epoch, epoch))
+    return ", ".join(str(lo) if lo == hi else f"{lo}–{hi}" for lo, hi in spans)
+
+
+# Ping a pooled connection that has been idle this long before reusing it.
+# A backfill batch can keep the parent's connection idle for minutes while
+# worker processes stream blocks, and a silently dropped TCP connection would
+# otherwise surface as a ConnectionError on the next phase-2 command.
+_HEALTH_CHECK_INTERVAL_SECONDS = 30
+
+
+class RedisSink:
+    """A plain Redis sink: blocks onto one list, plus a status hash.
+
+    The simple option, and deliberately not the epoch-stream protocol
+    ``HistoricalRedisSink`` implements — that one encodes an ordering and
+    completion contract a consumer has to opt into. This one just pushes
+    ``prepare_block`` payloads onto ``<prefix>blocks`` in order, which any
+    ``LPOP``/``BRPOP`` consumer can read with no further ceremony.
+
+    Structurally implements ``sinks.base.DataSink``, so it can be handed to
+    ``backfill()`` as a sink factory. It carries no ``EpochCoordinator``
+    surface, so such a backfill has no resumability and no backpressure.
     """
-    stream_info: dict[str, Any] = await redis.xinfo_stream(stream_key)
-    last_generated = stream_info.get("last-generated-id", b"0-0")
-    if isinstance(last_generated, bytes):
-        last_generated = last_generated.decode()
 
-    groups: list[dict[str, Any]] = await redis.xinfo_groups(stream_key)
-    if not groups:
-        return False
-
-    for group in groups:
-        pending = group.get("pending", 0)
-        if pending > 0:
-            return False
-        last_delivered = group.get("last-delivered-id", b"0-0")
-        if isinstance(last_delivered, bytes):
-            last_delivered = last_delivered.decode()
-        if last_delivered != last_generated:
-            return False
-
-    return True
-
-
-class RedisSink(DataSink):
     def __init__(
         self,
-        host: str = "localhost",
-        port: int = 6379,
-        db: int = 0,
+        *,
+        url: str | None = None,
         prefix: str = "hecate:",
         **redis_kwargs: Any,
     ):
-        """Initialize Redis connection."""
-        self.redis = aioredis.Redis(host=host, port=port, db=db, **redis_kwargs)
+        """Connect to ``url``, defaulting to ``REDIS_URL`` from the environment."""
+        self.redis = aioredis.from_url(url or settings.REDIS_URL, **redis_kwargs)
         self.prefix = prefix
         self.block_queue = f"{self.prefix}blocks"
         self.status_key = f"{self.prefix}status"
 
+    async def __aenter__(self) -> "RedisSink":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        await self.close()
+
     async def send_block(self, block: Block) -> None:
         """Send a block to Redis."""
-        block_data = await self._prepare_block(block)
+        block_data = prepare_block(block)
         await self.redis.rpush(self.block_queue, json.dumps(block_data))
         await self.redis.hset(self.status_key, "last_block_hash", block_data["hash"])
         await self.redis.hset(
@@ -80,13 +97,12 @@ class RedisSink(DataSink):
 
         pipeline = self.redis.pipeline()
         for block in blocks:
-            block_data = await self._prepare_block(block)
-            await pipeline.rpush(self.block_queue, json.dumps(block_data))
+            pipeline.rpush(self.block_queue, json.dumps(prepare_block(block)))
 
         # Update status with last block info
-        last_block = await self._prepare_block(blocks[-1])
-        await pipeline.hset(self.status_key, "last_block_hash", last_block["hash"])
-        await pipeline.hset(self.status_key, "last_block_slot", str(last_block["slot"]))
+        last_block = prepare_block(blocks[-1])
+        pipeline.hset(self.status_key, "last_block_hash", last_block["hash"])
+        pipeline.hset(self.status_key, "last_block_slot", str(last_block["slot"]))
 
         await pipeline.execute()
 
@@ -104,43 +120,16 @@ class RedisSink(DataSink):
         """Close the Redis connection."""
         await self.redis.close()
 
-    @classmethod
-    async def _prepare_block(cls, block: Block) -> dict[str, Any]:
-        """
-        Prepare a block for sending to Redis.
-        This method sends over the entire content of the block in dictionary format,
-        minus the schema attribute.
-        """
-        block_data = {"slot": -1, "hash": block.id}  # We want these fields to be first
-
-        # Filter out unwanted fields from the block
-        filtered_block_fields = ("_schematype", "issuer", "id")
-        block_data |= {
-            field: value
-            for field, value in block.__dict__.items()
-            if field not in filtered_block_fields
-            and field != "transactions"  # Handle txs next
-        }
-
-        # Filter out unwanted fields from transactions
-        filtered_tx_fields = ("datums", "scripts", "redeemers")
-        # noinspection PyTypeChecker
-        block_data["transactions"] = [
-            {
-                field: value
-                for field, value in tx.items()
-                if field not in filtered_tx_fields
-            }
-            for tx in block.transactions
-        ]
-
-        return block_data
-
 
 # Lua script to atomically advance last_synced_epoch
 _ADVANCE_EPOCH_LUA = r"""
 local last_synced_epoch, ready_set, resume_map = KEYS[1], KEYS[2], KEYS[3]
 local cur = tonumber(redis.call("GET", last_synced_epoch))
+if cur == nil then
+  return redis.error_reply(
+    "last_synced_epoch is unset: call ensure_ordering_base() before committing epochs"
+  )
+end
 local next = cur + 1
 while redis.call("SISMEMBER", ready_set, tostring(next)) == 1 do
   redis.call("SREM", ready_set, tostring(next))
@@ -152,9 +141,9 @@ return redis.call("GET", last_synced_epoch)
 """
 
 
-class HistoricalRedisSink(DataSink):
+class HistoricalRedisSink:
     """
-    A Redis‐backed DataSink for reliably streaming historical epoch data.
+    A Redis‐backed sink for reliably streaming historical epoch data.
 
     Each epoch's block batches are written directly to a dedicated per‐epoch
     Redis stream (``<prefix>epoch:{N}``). Control events are logged into a
@@ -167,13 +156,17 @@ class HistoricalRedisSink(DataSink):
 
     Ordering is guaranteed by construction: each epoch has its own stream,
     and consumers read streams in ascending epoch order.
+
+    Structurally implements both ``BlockRelay`` and ``EpochCoordinator``
+    (see ``sinks.base``); the extra surface is what gives a backfill
+    resumability, ordering and backpressure.
     """
 
     def __init__(
         self,
         *,
-        start_epoch: EpochNumber = FIRST_SHELLEY_EPOCH,
         prefix: str = "hecate:history:",
+        logger: logging.Logger | None = None,
     ):
         self.prefix = prefix
 
@@ -203,24 +196,28 @@ class HistoricalRedisSink(DataSink):
         # Epochs below this have been cleaned up.
         self.low_watermark = f"{prefix}low_watermark"
 
-        self.start_epoch = start_epoch
         self.redis: aioredis.Redis | None = None  # type: ignore
         self.metrics: MetricsClient | None = None
         self._advance_sha: str | None = None
-        self.logger = get_run_logger()
+        self.logger = logger or logging.getLogger(__name__)
 
-    async def __aenter__(self):
-        url = redis_settings.url
-        self.redis = aioredis.from_url(url, decode_responses=False)
+    async def __aenter__(self) -> "HistoricalRedisSink":
+        url = settings.REDIS_URL
+        self.redis = aioredis.from_url(
+            url,
+            decode_responses=False,
+            health_check_interval=_HEALTH_CHECK_INTERVAL_SECONDS,
+        )
         self.metrics = MetricsClient(self.redis, self.prefix, self.logger)
         self.logger.debug("🔗 Connecting to Redis at %s", url)
 
         # load our Lua once
         self._advance_sha = await self.redis.script_load(_ADVANCE_EPOCH_LUA)
         self.logger.debug("✅ loaded Lua advance script")
-        # ensure last_synced_epoch and low_watermark exist
-        await self.redis.setnx(self.last_synced_epoch, self.start_epoch - 1)
-        await self.redis.setnx(self.low_watermark, self.start_epoch)
+        # Deliberately no writes here: opening this sink to read status must
+        # not seed an ordering base, because a base that does not match the
+        # window a later run asks for silently strands that run's output.
+        # Seeding is `ensure_ordering_base`, called by whoever is relaying.
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -235,7 +232,7 @@ class HistoricalRedisSink(DataSink):
         epoch = kwargs.pop("epoch")
         last_height = blocks[-1].height
 
-        batch_list = [await self._prepare_block(b) for b in blocks]
+        batch_list = [prepare_block(b) for b in blocks]
         payload = json.dumps(batch_list)
 
         await self.redis.xadd(
@@ -322,46 +319,110 @@ class HistoricalRedisSink(DataSink):
         )
         return last_synced
 
-    async def get_last_synced_epoch(self) -> EpochNumber:
-        """Get the last synced epoch from Redis, or `start_epoch` if not set"""
+    async def ensure_ordering_base(self, base: EpochNumber) -> EpochNumber:
+        """Seed the ordering state if untouched, and report the base in force.
+
+        ``last_synced_epoch`` is both what consumers read up to and where
+        ``_ADVANCE_EPOCH_LUA`` starts walking, so it has to exist before any
+        epoch can be committed. Seeding is SETNX: an existing base belongs to
+        whoever wrote it, and is returned unchanged for the caller to judge
+        against the window it is about to relay — a base below
+        ``first_epoch - 1`` can never be walked up to, and every epoch such a
+        run publishes would sit unreachable in ``ready_set``.
+        """
+        assert self.redis, "Not initialized"
+        pipe = self.redis.pipeline(transaction=True)
+        pipe.setnx(self.last_synced_epoch, base)
+        pipe.setnx(self.low_watermark, base + 1)
+        await pipe.execute()
+
+        in_force = await self.get_last_synced_epoch()
+        assert in_force is not None, "ordering base vanished after seeding"
+        return in_force
+
+    async def reset_ordering_base(self, base: EpochNumber) -> None:
+        """Move the ordering base, dropping any claim on earlier epochs.
+
+        Only safe once ``purge_stale_streams`` has confirmed nothing below the
+        window is still owed to a consumer: this asserts that epochs at or
+        below ``base`` are out of scope, which is a lie unless the operator
+        means it. Consumers read ``last_synced_epoch`` as "everything through
+        here has been delivered".
+        """
+        assert self.redis, "Not initialized"
+        await self.redis.set(self.last_synced_epoch, base)
+
+    async def get_last_synced_epoch(self) -> EpochNumber | None:
+        """Highest epoch delivered in order, or None if nothing has been.
+
+        This is the field consumers bound their reads by.
+        """
         assert self.redis, "Not initialized"
         val = await self.redis.get(self.last_synced_epoch)
-        return EpochNumber(int(val)) if val else self.start_epoch
+        return EpochNumber(int(val)) if val is not None else None
 
     async def get_epoch_resume_height(self, epoch: EpochNumber) -> BlockHeight | None:
         assert self.redis, "Not initialized"
         val = await self.redis.hget(self.resume_map, epoch)
         return BlockHeight(int(val)) if val else None
 
-    async def get_low_watermark(self) -> EpochNumber:
-        """Get the lowest epoch whose stream still exists in Redis."""
+    async def get_low_watermark(self) -> EpochNumber | None:
+        """Lowest epoch whose stream still exists, or None if untouched."""
         assert self.redis, "Not initialized"
         val = await self.redis.get(self.low_watermark)
-        return EpochNumber(int(val)) if val else self.start_epoch
+        return EpochNumber(int(val)) if val is not None else None
 
-    async def purge_stale_streams(self, up_to_epoch: EpochNumber) -> int:
+    async def purge_stale_streams(
+        self, up_to_epoch: EpochNumber, *, purge_orphans: bool = False
+    ) -> int:
         """Delete epoch streams below ``up_to_epoch`` and advance ``low_watermark``.
 
-        Called at flow startup to remove orphaned streams left by prior
-        overlapping runs. Only purges streams that are safe to delete:
-        missing, orphaned (no consumer groups), or fully consumed.
+        Called at backfill startup to reclaim streams left below the window by
+        a prior run. Deletes only what is provably finished with: streams that
+        are missing, or that every registered consumer group has fully
+        acknowledged.
 
-        Raises ``RuntimeError`` if any stream has unconsumed data with active
-        consumer groups — prevents silent data loss.
+        A stream with data but **no** registered consumer group is refused by
+        default. "No group yet" and "no group ever" are the same state on the
+        wire, and a consumer fleet whose workers register independently may
+        simply not have started: dropping those epochs loses data with no
+        error on either side. ``purge_orphans`` opts into dropping them, for
+        recovering the namespace of a run whose consumers never existed.
 
-        Returns the number of streams purged.
+        Raises ``UnsafePurgeError`` rather than deleting anything a consumer is
+        still owed.
+
+        Returns the number of streams actually deleted, which is usually
+        fewer than the epochs swept: the range below a window is mostly
+        epochs that were never published here.
         """
         assert self.redis, "Not initialized"
         low_wm = await self.get_low_watermark()
 
-        if low_wm >= up_to_epoch:
+        if low_wm is None or low_wm >= up_to_epoch:
             return 0
 
-        for epoch in range(low_wm, up_to_epoch):
-            await self._assert_safe_to_purge(epoch)
+        swept = range(low_wm, up_to_epoch)
+        present: list[int] = []
+        orphaned: list[int] = []
+        for epoch in swept:
+            state = await self._stream_purge_state(epoch, purge_orphans=purge_orphans)
+            if state is _StreamState.ORPHANED:
+                orphaned.append(epoch)
+            if state is not _StreamState.ABSENT:
+                present.append(epoch)
+
+        if orphaned:
+            self.logger.warning(
+                "⚠️  Dropping %d epoch stream(s) with no registered consumer "
+                "group (%s): if a consumer meant to read them, that data is "
+                "gone",
+                len(orphaned),
+                _summarize_epochs(orphaned),
+            )
 
         pipe = self.redis.pipeline(transaction=True)
-        for epoch in range(low_wm, up_to_epoch):
+        for epoch in swept:
             pipe.delete(f"{self.epoch_stream_prefix}{epoch}")
             pipe.delete(epoch_meta_key(self.prefix, epoch))
             pipe.hdel(self.resume_map, epoch)
@@ -369,46 +430,63 @@ class HistoricalRedisSink(DataSink):
         pipe.set(self.low_watermark, up_to_epoch)
         await pipe.execute()
 
-        purged = up_to_epoch - low_wm
-        self.logger.info(
-            "Purged %d stale epoch stream(s) (%d–%d); low_watermark → %d",
-            purged,
-            low_wm,
-            up_to_epoch - 1,
-            up_to_epoch,
-        )
-        return purged
+        if present:
+            self.logger.info(
+                "Purged %d stale epoch stream(s) of %d–%d; low_watermark → %d",
+                len(present),
+                low_wm,
+                up_to_epoch - 1,
+                up_to_epoch,
+            )
+        else:
+            self.logger.info(
+                "No epoch streams present below %d; low_watermark → %d",
+                up_to_epoch,
+                up_to_epoch,
+            )
+        return len(present)
 
-    async def _assert_safe_to_purge(self, epoch: int) -> None:
-        """Raise if the epoch stream has unconsumed data.
-
-        Safe to purge when the stream is missing, has no consumer groups
-        (orphaned), or is fully consumed. Anything else means a consumer
-        still needs this data.
-        """
+    async def _stream_purge_state(
+        self, epoch: int, *, purge_orphans: bool
+    ) -> "_StreamState":
+        """Classify an epoch stream for purging, raising if it is still owed."""
         assert self.redis, "Not initialized"
         stream_key = f"{self.epoch_stream_prefix}{epoch}"
 
         if not await self.redis.exists(stream_key):
-            return
+            return _StreamState.ABSENT
 
         groups: list[dict[str, Any]] = await self.redis.xinfo_groups(stream_key)
         if not groups:
-            return
+            if purge_orphans:
+                return _StreamState.ORPHANED
+            raise UnsafePurgeError(
+                epoch,
+                stream_key,
+                "it holds data but no consumer group has registered. A "
+                "consumer that has not started yet looks exactly like one "
+                "that never will, so this is not assumed to be abandoned. "
+                "Start the consumers that should read it, or pass "
+                "purge_orphans=True (--purge-orphans) to drop it.",
+            )
 
         if await is_stream_fully_consumed(self.redis, stream_key):
-            return
+            return _StreamState.CONSUMED
 
-        raise RuntimeError(
-            f"Cannot purge epoch {epoch}: stream {stream_key} has unconsumed "
-            f"data with {len(groups)} active consumer group(s). "
-            f"Let consumers finish, or FLUSHDB to start from scratch."
+        raise UnsafePurgeError(
+            epoch,
+            stream_key,
+            f"it has unconsumed data with {len(groups)} active consumer "
+            f"group(s). Let consumers finish, or FLUSHDB to start from "
+            f"scratch.",
         )
 
     async def _consumer_lag(self) -> int:
         """Epochs published but not yet consumed (``last_synced - low_watermark``)."""
         last_synced = await self.get_last_synced_epoch()
         low_wm = await self.get_low_watermark()
+        if last_synced is None or low_wm is None:
+            return 0
         return last_synced - low_wm
 
     async def wait_for_backpressure(self) -> None:
@@ -423,7 +501,7 @@ class HistoricalRedisSink(DataSink):
         try:
             while (
                 lag := await self._consumer_lag()
-            ) >= redis_settings.max_unconsumed_epochs:
+            ) >= settings.REDIS_MAX_UNCONSUMED_EPOCHS:
                 if paused:
                     await asyncio.sleep(10)
                     continue
@@ -432,44 +510,81 @@ class HistoricalRedisSink(DataSink):
                 self.logger.warning(
                     "Backpressure: %d unconsumed epochs (limit %d). Waiting…",
                     lag,
-                    redis_settings.max_unconsumed_epochs,
+                    settings.REDIS_MAX_UNCONSUMED_EPOCHS,
                 )
                 await asyncio.sleep(10)
         finally:
             if paused:
                 await self.metrics.note_backpressure_resume()
 
+    async def note_batch_started(self, *, active: int, maximum: int) -> None:
+        """Record that a concurrent batch of epoch workers is in flight."""
+        assert self.metrics, "Not initialized"
+        await self.metrics.note_workers_busy(active=active, maximum=maximum)
+
+    async def note_batch_finished(self) -> None:
+        """Record that no epoch workers are running."""
+        assert self.metrics, "Not initialized"
+        await self.metrics.note_workers_idle()
+
+    @asynccontextmanager
+    async def run_bookkeeping(
+        self, *, target_epoch: EpochNumber
+    ) -> AsyncIterator[None]:
+        """Run this sink's background upkeep for the duration of the body.
+
+        Two loops the dashboard and Redis depend on, owned here rather than
+        by the backfill because both are Redis-shaped concerns:
+
+        * a 1Hz liveness heartbeat, so a dead producer is detectable;
+        * stream cleanup, deleting per-epoch streams every consumer group
+          has fully acknowledged and advancing ``low_watermark``.
+
+        Both hold their own Redis connections so they outlive any
+        open/close cycle on this sink's own connection.
+        """
+        cleanup = asyncio.create_task(
+            cleanup_streams_loop(
+                prefix=self.prefix, target_epoch=target_epoch, logger=self.logger
+            )
+        )
+        try:
+            async with heartbeat(settings.REDIS_URL, self.prefix):
+                yield
+        finally:
+            cleanup.cancel()
+            # Awaiting lets the loop close its own Redis connection.
+            with suppress(asyncio.CancelledError):
+                await cleanup
+
     async def get_status(self) -> dict[str, Any]:
+        """Report progress without touching it — this is a read-only call.
+
+        ``ordering_consistent`` checks the one invariant that cannot hold if
+        an ordering base was seeded below a window that was later relayed:
+        ``low_watermark`` may sit at most one epoch above
+        ``last_synced_epoch``, since nothing can be reclaimed before it has
+        been delivered. False means epochs are stranded in ``ready_set``
+        where no consumer bounded by ``last_synced_epoch`` can reach them.
+        """
         assert self.redis, "Not initialized"
+        last_synced = await self.get_last_synced_epoch()
+        low_wm = await self.get_low_watermark()
         return {
-            "last_synced_epoch": await self.get_last_synced_epoch(),
-            "low_watermark": await self.get_low_watermark(),
+            "last_synced_epoch": last_synced,
+            "low_watermark": low_wm,
             "epochs_individually_completed_pending_sync": await self.redis.scard(
                 self.ready_set
             ),
             "epochs_with_active_resume_points": await self.redis.hlen(self.resume_map),
+            "ordering_consistent": (
+                last_synced is None or low_wm is None or low_wm <= last_synced + 1
+            ),
             "redis_connection": "ok",
         }
 
     async def close(self) -> None:
         await self.__aexit__(None, None, None)
-
-    @classmethod
-    async def _prepare_block(cls, block: Block) -> dict[str, Any]:
-        """
-        Prepare a block for Redis storage by converting it to a dictionary format.
-
-        This method delegates to RedisSink._prepare_block to avoid code duplication,
-        accepting a small coupling between sink implementations in exchange for
-        maintaining consistency in how blocks are formatted across the application.
-
-        Args:
-            block: The Block object to prepare
-
-        Returns:
-            dict: A dictionary representation of the block ready for serialization
-        """
-        return await RedisSink._prepare_block(block)
 
     async def send_block(self, block: Block) -> None:
         """This method is not used in this class, as we only send batches of blocks instead."""

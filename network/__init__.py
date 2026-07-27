@@ -1,7 +1,7 @@
+from collections.abc import Iterator, Sequence
 from itertools import cycle
-from typing import Iterator
 
-from config.settings import ogmios_settings
+from config import settings
 
 
 class NetworkManager:
@@ -9,8 +9,8 @@ class NetworkManager:
 
     _endpoint_cycle: Iterator[str]
 
-    def __init__(self, endpoints: list[str] | None = None):
-        endpoints = endpoints or ogmios_settings.endpoints
+    def __init__(self, endpoints: Sequence[str] | None = None):
+        endpoints = endpoints or settings.OGMIOS_ENDPOINTS
         self._endpoint_cycle = cycle(endpoints)
 
     def get_connection(self) -> str:

@@ -29,38 +29,32 @@ While its main use case is to forward data via Redis, it can also be configured 
 │  │   Async     │     │  Core Processing           │     │  Data Sinks      │  │
 │  │   Client    │◄───►│                            │◄───►│                  │  │
 │  │             │     │  ┌──────────┐ ┌─────────┐  │     │ ┌────────┐       │  │
-│  └─────────────┘     │  │Historical│ │Realtime │  │     │ │Redis   │       │  │
-│         ▲            │  │Sync Flow │ │Sync Flow│  │     │ │Sink    │       │  │
+│  └─────────────┘     │  │ Backfill │ │ Relay   │  │     │ │Redis   │       │  │
+│         ▲            │  │(historic)│ │(planned)│  │     │ │Sink    │       │  │
 │         │            │  └──────────┘ └─────────┘  │     │ └────────┘       │  │
 │         │            │                            │     │ ┌────────┐       │  │
-│         │            │                            │     │ │CLI     │       │  │
-│         │            │                            │     │ │Sink    │       │  │
-│         │            │                            │     │ └────────┘       │  │
-│         │            │                            │     │                  │  │
-│         │            │                            │     │                  │  │
-│         │            └────────────────────────────┘     └──────────────────┘  │
-│         │                        │                             │              │
-└─────────┼────────────────────────┼─────────────────────────────┼──────────────┘
-          │                        │                             │
-          ▼                        │                             ▼
-┌────────────────┐                 │                   ┌──────────────────────┐
-│                │                 │                   │                      │
-│    Cardano     │                 │                   │    Downstream        │
-│    Node +      │                 │                   │    Applications      │
-│    Ogmios      │                 │                   │    (e.g. Exura)      │
-└────────────────┘                 ▼                   └──────────────────────┘
-                           ┌────────────────┐
-                           │                │
-                           │    Prefect     │
-                           │                │
-                           └────────────────┘
+│         │            │             ▲              │     │ │CLI     │       │  │
+│         │            │             │              │     │ │Sink    │       │  │
+│         │            │        ┌────┴────┐         │     │ └────────┘       │  │
+│         │            │        │   CLI   │         │     │                  │  │
+│         │            └────────┴─────────┴─────────┘     └──────────────────┘  │
+│         │                                                      │              │
+└─────────┼──────────────────────────────────────────────────────┼──────────────┘
+          │                                                      │
+          ▼                                                      ▼
+┌────────────────┐                                    ┌──────────────────────┐
+│                │                                    │                      │
+│    Cardano     │                                    │    Downstream        │
+│    Node +      │                                    │    Applications      │
+│    Ogmios      │                                    │    (e.g. Exura)      │
+└────────────────┘                                    └──────────────────────┘
 ```
 
 Hecate consists of:
 
 1. **Ogmios Client** - Asynchronous client for the Ogmios WebSocket API
 2. **Data Relay** - Efficiently forward blockchain data with minimal transformation
-3. **Prefect Flows** - Orchestrate historical and real-time data fetching
+3. **Backfill Core** - A plain `asyncio` coroutine that fetches epochs concurrently, driven by a thin CLI
 4. **Redis Integration** - Stream block data to downstream consumers via per-epoch Redis streams
 
 ## Features
@@ -68,7 +62,8 @@ Hecate consists of:
 - ⚡ **Parallel Historical Fetching** - Efficiently fetch the entire blockchain history in batches
 - 🔄 **Real-time Data Relay** - Stay current with the latest blocks and relay them to Redis or CLI
 - 🛡️ **Reorg Detection** - Catch chain reorganizations early and handle them gracefully
-- 📊 **Advanced Monitoring** - Track connection status, latency, and throughput metrics via Prefect
+- 🪶 **No Orchestrator** - Just `asyncio` and a CLI; progress lives in the sink, not an engine's database
+- 🔁 **Resumable** - Rerun after a failure and it continues from the last completed epoch
 - 🧰 **Flexible Deployment** - Run as a standalone service with simple configuration
 - 🔌 **Optional Dependencies** - Use only what you need - Redis is optional and can be installed separately
 
@@ -80,12 +75,36 @@ uv run python -m demo
 ```
 <img alt="Demo script output" src=".github/assets/demo.jpg">
 
-## Prefect Flows 🔄
+## Usage 🔮
 
-Hecate uses [Prefect](https://www.prefect.io/) to orchestrate historical backfill:
+```bash
+# Backfill from the first Shelley epoch to the chain's last finalized epoch
+uv run python -m cli backfill
 
-- **Historical Sync**: Efficiently backfill on-chain history in a resumable, concurrent manner
-- **[See detailed flows documentation](flows/README.md)**
+# A bounded range, six epochs at a time
+uv run python -m cli backfill --start-epoch 208 --end-epoch 320 --concurrency 6
+
+# No Redis needed — print what would be relayed
+uv run python -m cli backfill --start-epoch 208 --end-epoch 208 --sink cli
+
+# How far along is the Redis sink?
+uv run python -m cli status
+```
+
+Epochs are fetched concurrently — each in its own process, since block parsing
+is GIL-bound — then committed in ascending order so a consumer reading
+epoch-by-epoch never sees a gap. Progress lives in the sink, so a rerun
+resumes after the last epoch that completed, and a run whose window would leave
+a gap in what consumers can read is
+[refused rather than published](docs/backfill.md#bounded-windows-and-the-ordering-base).
+
+`backfill()` is also usable directly as a library: give it something that
+implements `send_batch` and it will relay blocks into it, no Redis and no CLI
+involved. **[See the detailed backfill documentation](docs/backfill.md)**.
+
+A `relay` command that follows the chain tip live is planned; the realtime
+client machinery it will build on (`client/chainsync`, `sinks.base.BufferedSink`)
+already exists.
 
 Epoch boundaries and block counts are derived directly from the chain over the
 same Ogmios connection used for streaming (see `epoch_derivation.py`), with an
@@ -113,28 +132,44 @@ cd hecate
 uv venv -p 3.12
 
 # Install one of the following:
-# 1) Base installation (no Redis support)
+# 1) Base installation (CLI sink only, no Redis support)
 uv sync
 
-# 2) With development tools
-uv sync --group dev
+# 2) With the Redis sink
+uv sync --group redis
 
-# 3) Complete installation (all features)
+# 3) Complete installation (Redis + development tools)
 uv sync --all-groups
+```
+
+### Configuration
+
+Settings are read from the environment at import time, optionally seeded from a
+dotenv file — `.env` at the repo root by default, or point `HECATE_ENV_FILE` at
+whichever one this environment should use. See the
+[backfill docs](docs/backfill.md#execution) for the full table; the two that
+matter most are `OGMIOS_ENDPOINTS` and `REDIS_URL`:
+
+```bash
+OGMIOS_ENDPOINTS='["ws://your-ogmios-host:1337"]' REDIS_URL='redis://localhost:6379/0' \
+  uv run python -m cli backfill --end-epoch 210
 ```
 
 ## Project Structure
 
 ```
 hecate/
+├── cli               # Command line entry point (python -m cli)
+├── backfill          # Historical backfill core — plain asyncio, no orchestrator
 ├── client/           # Ogmios WebSocket client
+├── config/           # Environment-backed settings and logging setup
 ├── data/             # Frozen bootstrap epoch-boundary data
-├── flows/            # Prefect flow definitions
-│   └── historical    # Historical synchronization flow
+├── docs/             # Longer-form documentation
 ├── epoch_derivation  # Derive epoch boundaries from the chain
 ├── sinks/            # Data sinks
-│   ├── redis/        # Redis sink for downstream service(s)
-│   └── cli/          # CLI sink for command line output
+│   ├── base          # Sink protocols: BlockRelay, EpochCoordinator
+│   ├── redis         # Redis sink for downstream service(s)
+│   └── cli           # CLI sink for command line output
 ├── constants         # Constant values and configurations
 └── models            # Data models and type definitions
 ```
