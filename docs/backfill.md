@@ -185,12 +185,21 @@ Redis at once: the backpressure allowance of published-but-unconsumed epochs,
 plus the batch currently being written. An epoch is not small — on the order of
 0.6 GiB in Babbage, 1–2 GiB through the Alonzo range.
 
-`--concurrency` defaults to the CPU count, because block parsing is the
-bottleneck it exists to parallelise. On a large producer host that can mean 16+
-epochs in flight, so **size deliberately rather than taking the default**: with
-`maxmemory` and `noeviction` an oversized run fails a write mid-epoch, and
-without `maxmemory` it takes the host's memory instead. Cap the sink's Redis and
-choose `--concurrency` to fit it.
+`--concurrency` defaults to **half** the CPU count (at least 1). Block parsing is
+what it exists to parallelise, but concurrency is bounded by memory well before
+it is bounded by cores: a CPU-count default puts 8–16 epochs in flight on hosts
+that routinely have 16 GB. Raise it deliberately, against a sink sized for the
+extra resident epochs.
+
+Note that `REDIS_MAX_UNCONSUMED_EPOCHS` (default 10) is the larger term in that
+sum for most configurations — it alone allows ~6–20 GiB of published-but-
+unconsumed epochs before backpressure engages. Size it together with
+`--concurrency`, not separately.
+
+Cap the sink's Redis with `maxmemory` and `noeviction`: an oversized run then
+fails a write mid-epoch instead of taking the host's memory, and eviction on
+this data would be silent loss of exactly what the ordering guarantees exist to
+prevent.
 
 ## Redis Integration & State Management
 

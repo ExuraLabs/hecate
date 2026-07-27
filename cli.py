@@ -106,7 +106,9 @@ def backfill(
         int | None,
         typer.Option(
             help="Epochs to fetch in parallel, each in its own process. "
-            "Defaults to the CPU count.",
+            "Defaults to half the CPU count, since each one holds a whole "
+            "epoch of blocks in the sink; raise it only against a sink sized "
+            "for that.",
             min=1,
         ),
     ] = None,

@@ -4,12 +4,10 @@ This is the library core. It has no orchestration dependency — no flow
 engine, no scheduler, no server. Give it an Ogmios endpoint and something
 that implements ``send_batch`` and it will relay blocks:
 
-    from functools import partial
-
     from backfill import backfill
     from sinks.redis import HistoricalRedisSink
 
-    await backfill(partial(HistoricalRedisSink, start_epoch=208), end_epoch=210)
+    await backfill(HistoricalRedisSink, start_epoch=208, end_epoch=210)
 
 Epochs are fetched concurrently in separate processes (block parsing is
 GIL-bound), then committed *in ascending order* so a downstream consumer
@@ -32,8 +30,8 @@ import ogmios.model.model_map as mm
 from ogmios import Block
 
 from client import HecateClient
-from config.log import configure_logging
 from config import settings
+from config.log import configure_logging
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES, FIRST_SHELLEY_EPOCH
 from epoch_cache import extend_cache, load_cache
 from epoch_derivation import regenerate_range
@@ -62,6 +60,7 @@ __all__ = [
     "UnsafePurgeError",
     "async_retry",
     "backfill",
+    "default_concurrency",
 ]
 
 T = TypeVar("T")
@@ -71,6 +70,21 @@ T = TypeVar("T")
 #: worker, which opens its own sink there. A sink class qualifies directly,
 #: as does ``functools.partial(SinkClass, prefix="…")``.
 SinkFactory = Callable[[], BlockRelay]
+
+
+def default_concurrency() -> int:
+    """Half the CPUs, at least one.
+
+    Concurrency is bounded by memory before it is bounded by cores: every
+    epoch in flight is a whole epoch of blocks resident in the sink, on the
+    order of a gigabyte. A CPU-count default puts 8–16 epochs in flight on
+    hosts that routinely have 16 GB, which overruns the sink long before it
+    saturates the cores. Halving trades throughput a caller can opt back
+    into via ``--concurrency`` for a default that does not surprise anyone
+    downstream.
+    """
+    return max(1, cpu_count() // 2)
+
 
 # Attempts after the first, and the wait between them.
 DEFAULT_RETRIES = 3
@@ -441,7 +455,9 @@ async def backfill(
         clamped to — the last finalized epoch, read live from the chain.
     :param batch_size: Blocks per ``send_batch`` call. Defaults to
         ``BATCH_SIZE`` from the environment.
-    :param concurrency: Epochs fetched in parallel. Defaults to the CPU count.
+    :param concurrency: Epochs fetched in parallel. Defaults to half the CPU
+        count — see ``default_concurrency``; raise it only against a sink
+        sized for the extra resident epochs.
     :param endpoints: Ogmios endpoints to rotate through. Defaults to
         ``OGMIOS_ENDPOINTS`` from the environment.
     :param kupo_url: Optional kupo endpoint, which accelerates deriving
@@ -473,7 +489,7 @@ async def backfill(
     """
     run_start = time.perf_counter()
     batch_size = batch_size or settings.BATCH_SIZE
-    concurrency = concurrency or cpu_count()
+    concurrency = concurrency or default_concurrency()
     network_manager = NetworkManager(endpoints)
 
     async with AsyncExitStack() as stack:
