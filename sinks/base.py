@@ -107,8 +107,16 @@ class EpochCoordinator(BlockRelay, Protocol):
         """Publish an epoch as complete; returns the new last-synced epoch."""
         ...
 
-    async def purge_stale_streams(self, up_to_epoch: EpochNumber) -> int:
-        """Drop orphaned published data below ``up_to_epoch``."""
+    async def purge_stale_streams(
+        self, up_to_epoch: EpochNumber, *, purge_orphans: bool = False
+    ) -> int:
+        """Reclaim published data below ``up_to_epoch`` that is finished with.
+
+        Must refuse — not delete — anything a consumer could still be owed.
+        ``purge_orphans`` opts into dropping data no consumer has registered
+        for, which is otherwise indistinguishable from data whose consumer has
+        not started yet.
+        """
         ...
 
     async def wait_for_backpressure(self) -> None:

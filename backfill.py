@@ -37,11 +37,32 @@ from config import settings
 from constants import BLOCKS_IN_EPOCH, EPOCH_BOUNDARIES, FIRST_SHELLEY_EPOCH
 from epoch_cache import extend_cache, load_cache
 from epoch_derivation import regenerate_range
+from errors import (
+    BackfillError,
+    EpochsFailedError,
+    OrderingStalledError,
+    UnreachableWindowError,
+    UnsafePurgeError,
+)
 from models import BlockHeight, EpochData, EpochNumber
 from network import NetworkManager
 from sinks.base import BlockRelay, EpochCoordinator
 
 logger = logging.getLogger(__name__)
+
+# The library's surface. The errors are re-exported from their home in
+# `errors` so that catching what `backfill()` raises needs one import, not two.
+__all__ = [
+    "BackfillError",
+    "EpochJob",
+    "EpochsFailedError",
+    "OrderingStalledError",
+    "SinkFactory",
+    "UnreachableWindowError",
+    "UnsafePurgeError",
+    "async_retry",
+    "backfill",
+]
 
 T = TypeVar("T")
 
@@ -76,66 +97,6 @@ def fast_block_init(self: Block, blocktype: mm.Types, **kwargs: Any) -> None:
 # load-bearing: worker processes reach the fetch code by importing this
 # module, which is what applies the patch on their side of the fork.
 Block.__init__ = fast_block_init
-
-
-class BackfillError(RuntimeError):
-    """Base class for every way a backfill can fail."""
-
-
-class EpochsFailedError(BackfillError):
-    """One or more epochs could not be relayed, even after retries.
-
-    Raised after the surviving epochs in the batch have been committed, so
-    ``last_synced_epoch`` still marks a contiguous, consumable prefix and a
-    rerun picks up from the first epoch that failed.
-    """
-
-    def __init__(self, failures: dict[EpochNumber, BaseException]):
-        self.failures = failures
-        listed = ", ".join(str(epoch) for epoch in sorted(failures))
-        super().__init__(f"{len(failures)} epoch(s) failed after retries: {listed}")
-
-
-class UnreachableWindowError(BackfillError):
-    """The sink's ordering base sits below the window we were asked to relay.
-
-    Ordered completion advances one epoch at a time from the base, so it can
-    never step over the gap: every epoch such a run relayed would land in the
-    sink marked ready and stay unreachable, while the run reported success.
-    Refused before anything is written.
-    """
-
-    def __init__(self, *, base: EpochNumber, start_epoch: EpochNumber):
-        self.base = base
-        self.start_epoch = start_epoch
-        super().__init__(
-            f"sink's last_synced_epoch is {base}, but relaying from "
-            f"{start_epoch} needs it at {start_epoch - 1}: epochs "
-            f"{base + 1}–{start_epoch - 1} were never delivered here, so "
-            f"nothing this run published could become visible. Either relay "
-            f"from {base + 1}, or pass rebase_ordering_base=True "
-            f"(--rebase-ordering-base) to write those epochs off as out of "
-            f"scope."
-        )
-
-
-class OrderingStalledError(BackfillError):
-    """Every epoch relayed, but the sink's delivered mark did not reach them.
-
-    A guard against silently publishing data no consumer can reach: the
-    delivered mark is the one field consumers bound their reads by, so a run
-    must never report success while it lags the epochs just written.
-    """
-
-    def __init__(self, *, last_synced: EpochNumber | None, target: EpochNumber):
-        self.last_synced = last_synced
-        self.target = target
-        super().__init__(
-            f"relayed through epoch {target}, but the sink reports "
-            f"last_synced_epoch={last_synced}: epochs are stranded where no "
-            f"consumer can read them. This is a bug, not a config problem — "
-            f"please report the sink's status output."
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,6 +417,7 @@ async def backfill(
     endpoints: Sequence[str] | None = None,
     kupo_url: str | None = None,
     rebase_ordering_base: bool = False,
+    purge_orphans: bool = False,
     retries: int = DEFAULT_RETRIES,
     retry_delay_seconds: float = DEFAULT_RETRY_DELAY_SECONDS,
     log_level: int = logging.INFO,
@@ -488,6 +450,10 @@ async def backfill(
         delivered mark, moving the mark up to meet it. This declares the
         epochs in between out of scope — they will never be delivered from
         this sink — so it is an assertion about intent, not a repair.
+    :param purge_orphans: Allow the startup purge to drop already-published
+        epochs that no consumer group has registered for. Off by default: a
+        consumer that has not started yet is indistinguishable from one that
+        never will, and guessing wrong loses data silently.
     :param retries: Extra attempts per epoch after the first failure.
     :param retry_delay_seconds: Wait between attempts.
     :param log_level: Level worker processes configure logging at.
@@ -496,10 +462,14 @@ async def backfill(
     :raises UnreachableWindowError: if the sink's delivered mark sits below
         the window and ``rebase_ordering_base`` was not given. Nothing is
         written; the run could not have become visible.
+    :raises UnsafePurgeError: if reclaiming already-published epochs below the
+        window would take data from a consumer. Nothing is deleted.
     :raises EpochsFailedError: if any epoch failed every attempt. Epochs that
         succeeded are committed first, so a rerun resumes cleanly.
     :raises OrderingStalledError: if the relayed epochs did not become
         visible. A bug guard; it should be unreachable.
+
+    All of the above subclass ``errors.BackfillError``.
     """
     run_start = time.perf_counter()
     batch_size = batch_size or settings.BATCH_SIZE
@@ -524,10 +494,19 @@ async def backfill(
             if base >= start_epoch:
                 # The sink is already past the requested start — including the
                 # case base == start_epoch, where that epoch is done and
-                # re-relaying it would strand a duplicate.
-                logger.info(
-                    "🔄 Resuming after last synced epoch %d instead of %d",
+                # re-relaying it would strand a duplicate. Warned, not just
+                # noted: the caller asked for a window and is getting a
+                # narrower one, which is the same class of surprise as the
+                # refusal below and deserves the same volume.
+                logger.warning(
+                    "⚠️  Narrowing the window: epochs %d–%d were already "
+                    "delivered here, so this run relays from %d, not %d. A "
+                    "consumer re-reading from %d will not receive them again "
+                    "— flush the namespace to relay them afresh.",
+                    start_epoch,
                     base,
+                    base + 1,
+                    start_epoch,
                     start_epoch,
                 )
                 start_epoch = EpochNumber(base + 1)
@@ -539,9 +518,11 @@ async def backfill(
             # Purge orphaned epoch streams below start_epoch from prior
             # overlapping runs. Without this, streams that no consumer will
             # ever read (0 consumer groups) block backpressure indefinitely.
-            # It also refuses to drop anything a live consumer group is still
-            # owed, which is what makes the rebase below safe to do after it.
-            await coordinator.purge_stale_streams(start_epoch)
+            # It also refuses to drop anything a consumer might still be owed,
+            # which is what makes the rebase below safe to do after it.
+            await coordinator.purge_stale_streams(
+                start_epoch, purge_orphans=purge_orphans
+            )
 
             if rebase_needed:
                 logger.warning(

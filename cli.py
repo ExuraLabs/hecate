@@ -17,8 +17,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from backfill import BackfillError, SinkFactory, backfill as run_backfill
+from backfill import SinkFactory, backfill as run_backfill
 from config.log import configure_logging
+from errors import BackfillError
 from constants import FIRST_SHELLEY_EPOCH
 from models import EpochNumber
 
@@ -135,6 +136,17 @@ def backfill(
             f"'{DEFAULT_LIST_PREFIX}' for --sink redis-list.",
         ),
     ] = None,
+    purge_orphans: Annotated[
+        bool,
+        typer.Option(
+            "--purge-orphans",
+            help="Let the startup purge drop already-published epochs below the "
+            "window that no consumer group has registered for. Off by "
+            "default, because a consumer that has not started yet looks "
+            "exactly like one that never will. Use it to reclaim a namespace "
+            "whose consumers genuinely never existed.",
+        ),
+    ] = False,
     rebase_ordering_base: Annotated[
         bool,
         typer.Option(
@@ -171,6 +183,7 @@ def backfill(
                 endpoints=endpoint or None,
                 kupo_url=kupo_url,
                 rebase_ordering_base=rebase_ordering_base,
+                purge_orphans=purge_orphans,
                 log_level=level,
             )
         )

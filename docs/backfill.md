@@ -80,7 +80,9 @@ dotenv entries. Any `.env*` file is gitignored.
   streams are unconsumed. If the gap reaches `REDIS_MAX_UNCONSUMED_EPOCHS` it
   pauses until consumers catch up.
 - **Stream Cleanup**: a background task deletes epoch streams once every
-  consumer group has acknowledged every entry, advancing `low_watermark`.
+  consumer group has acknowledged every entry, advancing `low_watermark`. It
+  never deletes a stream no group has registered for — see the consumer
+  contract below.
 - **Fast block construction**: historical blocks bypass Pydantic validation
   (`fast_block_init`), which is redundant for data already on chain.
 
@@ -98,8 +100,14 @@ anything is written:
 | Sink state | What happens |
 |---|---|
 | `last_synced_epoch` unset | Seeded to `N - 1`. Fresh namespace, nothing to reconcile |
-| `last_synced_epoch >= N` | Already delivered that far; the run resumes from `last_synced_epoch + 1` and logs that it did |
+| `last_synced_epoch >= N` | Already delivered that far; the run **narrows** to `last_synced_epoch + 1 …` and warns which epochs it is not relaying |
 | `last_synced_epoch < N - 1` | **Refused** with `UnreachableWindowError`, naming the gap. Nothing is relayed |
+
+Both mismatches are loud, because both mean the window you get is not the window
+you asked for. Narrowing is a warning rather than an error because resuming is
+usually the intent — but a consumer that was reset and is re-reading from an
+earlier epoch will wait forever for epochs the producer has decided not to
+resend, so the run says so explicitly.
 
 For chunked orchestration this is invisible as long as chunk windows are
 contiguous: chunk `[501, 503]` leaves the base at 503, and chunk `[504, …]`
@@ -132,6 +140,57 @@ with afterwards are reclaimed by the **next** run's `purge_stale_streams` — wh
 deletes only streams that are missing, orphaned, or fully consumed, and raises
 rather than dropping anything a live consumer group is still owed. So a chunked
 pipeline should budget for roughly one chunk of streams resident at a time.
+
+## The epoch-stream consumer contract
+
+Two hard requirements. Both are properties of the protocol, not of any
+particular consumer, and getting them wrong loses data quietly.
+
+**1. Do not read an epoch stream until `last_synced_epoch` has reached that
+epoch.** A stream that has appeared is not yet a stream you may read. Each retry
+of an epoch *deletes and rewrites* its stream (`reset_epoch_state`), so a
+consumer reading `epoch:{N}` while epoch N is still in flight can have entries
+deleted underneath it mid-read, and can read blocks that a later attempt
+supersedes. `last_synced_epoch` advancing past N is the only signal that
+`epoch:{N}` is final. Epochs also complete out of order internally — they are
+relayed concurrently and committed in order — so the presence of `epoch:{N+1}`
+implies nothing about N.
+
+**2. Register your consumer group before the producer runs, or accept that the
+producer cannot know you exist.** Reclamation decides what is finished with by
+reading consumer-group state. A stream with no registered group is ambiguous —
+a consumer that has not started yet looks identical to one that never will — so
+the startup purge refuses it by default and aborts the run rather than guess.
+`--purge-orphans` opts into dropping such epochs, for reclaiming a namespace
+whose consumers genuinely never existed; it logs a warning naming what it drops.
+The background cleanup loop never drops them under any setting.
+
+For a fleet of consumers each with its own group (a broadcast fan-out), the
+consequence of requirement 2 is that a worker which registers late is safe by
+default — but the producer will pause on backpressure while its epochs stay
+unacknowledged, because `low_watermark` cannot advance past a stream no group
+has finished with.
+
+The practical shape of this for chunked runs:
+
+| | Second and later chunks |
+|---|---|
+| A consumer registers and drains each chunk | Proceed normally; nothing to opt into. Drained streams are reclaimed as fully consumed |
+| Nothing is consuming (seeding ahead of the readers) | **Refused** — the previous chunk's epochs have no reader registered. Pass `--purge-orphans` to declare that intentional |
+
+## Sizing the sink's Redis
+
+Roughly `REDIS_MAX_UNCONSUMED_EPOCHS + --concurrency` epochs are resident in
+Redis at once: the backpressure allowance of published-but-unconsumed epochs,
+plus the batch currently being written. An epoch is not small — on the order of
+0.6 GiB in Babbage, 1–2 GiB through the Alonzo range.
+
+`--concurrency` defaults to the CPU count, because block parsing is the
+bottleneck it exists to parallelise. On a large producer host that can mean 16+
+epochs in flight, so **size deliberately rather than taking the default**: with
+`maxmemory` and `noeviction` an oversized run fails a write mid-epoch, and
+without `maxmemory` it takes the host's memory instead. Cap the sink's Redis and
+choose `--concurrency` to fit it.
 
 ## Redis Integration & State Management
 

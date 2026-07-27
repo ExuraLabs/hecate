@@ -3,12 +3,14 @@ import importlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from enum import Enum, auto
 from typing import Any
 
 import orjson as json
 from ogmios import Block
 
 from config import settings
+from errors import UnsafePurgeError
 from models import BlockHeight, EpochNumber
 from sinks.base import prepare_block
 from sinks.metrics import MetricsClient, epoch_meta_key, heartbeat
@@ -16,6 +18,28 @@ from sinks.stream_cleanup import cleanup_streams_loop, is_stream_fully_consumed
 
 _redis_module = importlib.import_module("redis.asyncio")
 aioredis = _redis_module
+
+
+class _StreamState(Enum):
+    """What the startup purge found for one epoch."""
+
+    ABSENT = auto()  # nothing there; the usual case below a window
+    CONSUMED = auto()  # every registered group acknowledged everything
+    ORPHANED = auto()  # holds data, but no group registered — see purge_orphans
+
+
+def _summarize_epochs(epochs: list[int]) -> str:
+    """Render epoch numbers compactly, collapsing runs into ranges."""
+    if not epochs:
+        return "none"
+    spans: list[tuple[int, int]] = []
+    for epoch in epochs:
+        if spans and epoch == spans[-1][1] + 1:
+            spans[-1] = (spans[-1][0], epoch)
+        else:
+            spans.append((epoch, epoch))
+    return ", ".join(str(lo) if lo == hi else f"{lo}–{hi}" for lo, hi in spans)
+
 
 # Ping a pooled connection that has been idle this long before reusing it.
 # A backfill batch can keep the parent's connection idle for minutes while
@@ -348,15 +372,25 @@ class HistoricalRedisSink:
         val = await self.redis.get(self.low_watermark)
         return EpochNumber(int(val)) if val is not None else None
 
-    async def purge_stale_streams(self, up_to_epoch: EpochNumber) -> int:
+    async def purge_stale_streams(
+        self, up_to_epoch: EpochNumber, *, purge_orphans: bool = False
+    ) -> int:
         """Delete epoch streams below ``up_to_epoch`` and advance ``low_watermark``.
 
-        Called at backfill startup to remove orphaned streams left by prior
-        overlapping runs. Only purges streams that are safe to delete:
-        missing, orphaned (no consumer groups), or fully consumed.
+        Called at backfill startup to reclaim streams left below the window by
+        a prior run. Deletes only what is provably finished with: streams that
+        are missing, or that every registered consumer group has fully
+        acknowledged.
 
-        Raises ``RuntimeError`` if any stream has unconsumed data with active
-        consumer groups — prevents silent data loss.
+        A stream with data but **no** registered consumer group is refused by
+        default. "No group yet" and "no group ever" are the same state on the
+        wire, and a consumer fleet whose workers register independently may
+        simply not have started: dropping those epochs loses data with no
+        error on either side. ``purge_orphans`` opts into dropping them, for
+        recovering the namespace of a run whose consumers never existed.
+
+        Raises ``UnsafePurgeError`` rather than deleting anything a consumer is
+        still owed.
 
         Returns the number of streams actually deleted, which is usually
         fewer than the epochs swept: the range below a window is mostly
@@ -369,7 +403,23 @@ class HistoricalRedisSink:
             return 0
 
         swept = range(low_wm, up_to_epoch)
-        present = [epoch for epoch in swept if await self._check_purgeable(epoch)]
+        present: list[int] = []
+        orphaned: list[int] = []
+        for epoch in swept:
+            state = await self._stream_purge_state(epoch, purge_orphans=purge_orphans)
+            if state is _StreamState.ORPHANED:
+                orphaned.append(epoch)
+            if state is not _StreamState.ABSENT:
+                present.append(epoch)
+
+        if orphaned:
+            self.logger.warning(
+                "⚠️  Dropping %d epoch stream(s) with no registered consumer "
+                "group (%s): if a consumer meant to read them, that data is "
+                "gone",
+                len(orphaned),
+                _summarize_epochs(orphaned),
+            )
 
         pipe = self.redis.pipeline(transaction=True)
         for epoch in swept:
@@ -396,30 +446,39 @@ class HistoricalRedisSink:
             )
         return len(present)
 
-    async def _check_purgeable(self, epoch: int) -> bool:
-        """Report whether this epoch has a stream, raising if it is still owed.
-
-        Safe to purge when the stream is missing, has no consumer groups
-        (orphaned), or is fully consumed. Anything else means a consumer
-        still needs this data.
-        """
+    async def _stream_purge_state(
+        self, epoch: int, *, purge_orphans: bool
+    ) -> "_StreamState":
+        """Classify an epoch stream for purging, raising if it is still owed."""
         assert self.redis, "Not initialized"
         stream_key = f"{self.epoch_stream_prefix}{epoch}"
 
         if not await self.redis.exists(stream_key):
-            return False
+            return _StreamState.ABSENT
 
         groups: list[dict[str, Any]] = await self.redis.xinfo_groups(stream_key)
         if not groups:
-            return True
+            if purge_orphans:
+                return _StreamState.ORPHANED
+            raise UnsafePurgeError(
+                epoch,
+                stream_key,
+                "it holds data but no consumer group has registered. A "
+                "consumer that has not started yet looks exactly like one "
+                "that never will, so this is not assumed to be abandoned. "
+                "Start the consumers that should read it, or pass "
+                "purge_orphans=True (--purge-orphans) to drop it.",
+            )
 
         if await is_stream_fully_consumed(self.redis, stream_key):
-            return True
+            return _StreamState.CONSUMED
 
-        raise RuntimeError(
-            f"Cannot purge epoch {epoch}: stream {stream_key} has unconsumed "
-            f"data with {len(groups)} active consumer group(s). "
-            f"Let consumers finish, or FLUSHDB to start from scratch."
+        raise UnsafePurgeError(
+            epoch,
+            stream_key,
+            f"it has unconsumed data with {len(groups)} active consumer "
+            f"group(s). Let consumers finish, or FLUSHDB to start from "
+            f"scratch.",
         )
 
     async def _consumer_lag(self) -> int:
