@@ -25,6 +25,12 @@ redis = [
     "redis[hiredis]>=5.2.1",
 ]
 
+[tool.ruff.lint]
+# Stated rather than inherited: Ruff's default selection widens between
+# releases, and a lint set that changes under you on an unrelated upgrade
+# turns every dependency bump into a refactor. Add rules deliberately.
+select = ["E4", "E7", "E9", "F"]
+
 [tool.mypy]
 strict = true
 warn_return_any = true

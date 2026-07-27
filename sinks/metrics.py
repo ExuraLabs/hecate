@@ -262,4 +262,4 @@ async def heartbeat(
             await task
         except asyncio.CancelledError:
             pass
-        await redis.close()
+        await redis.aclose()

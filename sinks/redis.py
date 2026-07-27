@@ -118,7 +118,7 @@ class RedisSink:
 
     async def close(self) -> None:
         """Close the Redis connection."""
-        await self.redis.close()
+        await self.redis.aclose()
 
 
 # Lua script to atomically advance last_synced_epoch
@@ -222,7 +222,7 @@ class HistoricalRedisSink:
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         if self.redis:
-            await self.redis.close()
+            await self.redis.aclose()
             self.logger.debug("🛑 Redis connection closed")
 
     async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:

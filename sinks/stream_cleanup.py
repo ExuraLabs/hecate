@@ -179,4 +179,4 @@ async def cleanup_streams_loop(
     except asyncio.CancelledError:
         logger.info("Cleanup loop cancelled — backfill complete")
     finally:
-        await redis.close()
+        await redis.aclose()
