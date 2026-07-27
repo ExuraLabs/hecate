@@ -56,7 +56,7 @@ def _resolve_log_level(name: str) -> int:
 
 
 def _sink_factory(
-    sink: SinkName, *, start_epoch: EpochNumber, prefix: str | None
+    sink: SinkName, *, prefix: str | None
 ) -> SinkFactory:  # pragma: no cover - thin wiring
     """Resolve a sink choice to a factory, or exit with a usable message.
 
@@ -82,11 +82,7 @@ def _sink_factory(
 
     if sink is SinkName.redis_list:
         return partial(RedisSink, prefix=prefix or DEFAULT_LIST_PREFIX)
-    return partial(
-        HistoricalRedisSink,
-        start_epoch=start_epoch,
-        prefix=prefix or DEFAULT_HISTORY_PREFIX,
-    )
+    return partial(HistoricalRedisSink, prefix=prefix or DEFAULT_HISTORY_PREFIX)
 
 
 @app.command()
@@ -139,6 +135,17 @@ def backfill(
             f"'{DEFAULT_LIST_PREFIX}' for --sink redis-list.",
         ),
     ] = None,
+    rebase_ordering_base: Annotated[
+        bool,
+        typer.Option(
+            "--rebase-ordering-base",
+            help="Permit a window starting above the sink's last_synced_epoch, "
+            "moving it up to meet --start-epoch. Declares the epochs in "
+            "between out of scope — they will never be delivered from this "
+            "sink. Without this, such a run is refused, because nothing it "
+            "published could become visible.",
+        ),
+    ] = False,
     log_level: Annotated[str, typer.Option(help="Logging verbosity.")] = "INFO",
 ) -> None:
     """Relay a range of historical epochs, oldest first.
@@ -151,7 +158,7 @@ def backfill(
     configure_logging(level)
 
     start = EpochNumber(start_epoch)
-    sink_factory = _sink_factory(sink, start_epoch=start, prefix=redis_prefix)
+    sink_factory = _sink_factory(sink, prefix=redis_prefix)
 
     try:
         asyncio.run(
@@ -163,11 +170,13 @@ def backfill(
                 concurrency=concurrency,
                 endpoints=endpoint or None,
                 kupo_url=kupo_url,
+                rebase_ordering_base=rebase_ordering_base,
                 log_level=level,
             )
         )
     except BackfillError as exc:
-        # Already logged per epoch; keep the exit terse and non-zero.
+        # Per-epoch failures are already logged; window and ordering problems
+        # carry their whole explanation in the message.
         console.print(f"[bold red]Backfill incomplete:[/] {exc}")
         raise typer.Exit(code=1) from None
     except KeyboardInterrupt:
@@ -181,7 +190,11 @@ def status(
         str, typer.Option(help="Key prefix of the epoch-stream sink to report on.")
     ] = DEFAULT_HISTORY_PREFIX,
 ) -> None:
-    """Report how far the epoch-stream Redis sink has been filled."""
+    """Report how far the epoch-stream Redis sink has been filled.
+
+    Read-only: this writes nothing, so it is safe against a namespace a
+    backfill has not claimed yet.
+    """
     from sinks.redis import HistoricalRedisSink
 
     async def _status() -> dict[str, object]:
@@ -189,13 +202,24 @@ def status(
             return await sink.get_status()
 
     report = asyncio.run(_status())
+    consistent = report.pop("ordering_consistent", True)
 
     table = Table(title=f"Hecate — {redis_prefix}")
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="green")
     for key, value in report.items():
-        table.add_row(key.replace("_", " "), str(value))
+        table.add_row(key.replace("_", " "), "—" if value is None else str(value))
     console.print(table)
+
+    if report.get("last_synced_epoch") is None:
+        console.print("[dim]Nothing relayed here yet.[/]")
+    if not consistent:
+        console.print(
+            "[bold red]Inconsistent:[/] low_watermark is above "
+            "last_synced_epoch + 1, so epochs were published that no consumer "
+            "reading up to last_synced_epoch can reach. Flush this namespace, "
+            "or relay from last_synced_epoch + 1."
+        )
 
 
 if __name__ == "__main__":

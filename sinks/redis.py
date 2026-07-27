@@ -9,7 +9,6 @@ import orjson as json
 from ogmios import Block
 
 from config import settings
-from constants import FIRST_SHELLEY_EPOCH
 from models import BlockHeight, EpochNumber
 from sinks.base import prepare_block
 from sinks.metrics import MetricsClient, epoch_meta_key, heartbeat
@@ -102,6 +101,11 @@ class RedisSink:
 _ADVANCE_EPOCH_LUA = r"""
 local last_synced_epoch, ready_set, resume_map = KEYS[1], KEYS[2], KEYS[3]
 local cur = tonumber(redis.call("GET", last_synced_epoch))
+if cur == nil then
+  return redis.error_reply(
+    "last_synced_epoch is unset: call ensure_ordering_base() before committing epochs"
+  )
+end
 local next = cur + 1
 while redis.call("SISMEMBER", ready_set, tostring(next)) == 1 do
   redis.call("SREM", ready_set, tostring(next))
@@ -137,7 +141,6 @@ class HistoricalRedisSink:
     def __init__(
         self,
         *,
-        start_epoch: EpochNumber = FIRST_SHELLEY_EPOCH,
         prefix: str = "hecate:history:",
         logger: logging.Logger | None = None,
     ):
@@ -169,7 +172,6 @@ class HistoricalRedisSink:
         # Epochs below this have been cleaned up.
         self.low_watermark = f"{prefix}low_watermark"
 
-        self.start_epoch = start_epoch
         self.redis: aioredis.Redis | None = None  # type: ignore
         self.metrics: MetricsClient | None = None
         self._advance_sha: str | None = None
@@ -188,9 +190,10 @@ class HistoricalRedisSink:
         # load our Lua once
         self._advance_sha = await self.redis.script_load(_ADVANCE_EPOCH_LUA)
         self.logger.debug("✅ loaded Lua advance script")
-        # ensure last_synced_epoch and low_watermark exist
-        await self.redis.setnx(self.last_synced_epoch, self.start_epoch - 1)
-        await self.redis.setnx(self.low_watermark, self.start_epoch)
+        # Deliberately no writes here: opening this sink to read status must
+        # not seed an ordering base, because a base that does not match the
+        # window a later run asks for silently strands that run's output.
+        # Seeding is `ensure_ordering_base`, called by whoever is relaying.
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -292,22 +295,58 @@ class HistoricalRedisSink:
         )
         return last_synced
 
-    async def get_last_synced_epoch(self) -> EpochNumber:
-        """Get the last synced epoch from Redis, or `start_epoch` if not set"""
+    async def ensure_ordering_base(self, base: EpochNumber) -> EpochNumber:
+        """Seed the ordering state if untouched, and report the base in force.
+
+        ``last_synced_epoch`` is both what consumers read up to and where
+        ``_ADVANCE_EPOCH_LUA`` starts walking, so it has to exist before any
+        epoch can be committed. Seeding is SETNX: an existing base belongs to
+        whoever wrote it, and is returned unchanged for the caller to judge
+        against the window it is about to relay — a base below
+        ``first_epoch - 1`` can never be walked up to, and every epoch such a
+        run publishes would sit unreachable in ``ready_set``.
+        """
+        assert self.redis, "Not initialized"
+        pipe = self.redis.pipeline(transaction=True)
+        pipe.setnx(self.last_synced_epoch, base)
+        pipe.setnx(self.low_watermark, base + 1)
+        await pipe.execute()
+
+        in_force = await self.get_last_synced_epoch()
+        assert in_force is not None, "ordering base vanished after seeding"
+        return in_force
+
+    async def reset_ordering_base(self, base: EpochNumber) -> None:
+        """Move the ordering base, dropping any claim on earlier epochs.
+
+        Only safe once ``purge_stale_streams`` has confirmed nothing below the
+        window is still owed to a consumer: this asserts that epochs at or
+        below ``base`` are out of scope, which is a lie unless the operator
+        means it. Consumers read ``last_synced_epoch`` as "everything through
+        here has been delivered".
+        """
+        assert self.redis, "Not initialized"
+        await self.redis.set(self.last_synced_epoch, base)
+
+    async def get_last_synced_epoch(self) -> EpochNumber | None:
+        """Highest epoch delivered in order, or None if nothing has been.
+
+        This is the field consumers bound their reads by.
+        """
         assert self.redis, "Not initialized"
         val = await self.redis.get(self.last_synced_epoch)
-        return EpochNumber(int(val)) if val else self.start_epoch
+        return EpochNumber(int(val)) if val is not None else None
 
     async def get_epoch_resume_height(self, epoch: EpochNumber) -> BlockHeight | None:
         assert self.redis, "Not initialized"
         val = await self.redis.hget(self.resume_map, epoch)
         return BlockHeight(int(val)) if val else None
 
-    async def get_low_watermark(self) -> EpochNumber:
-        """Get the lowest epoch whose stream still exists in Redis."""
+    async def get_low_watermark(self) -> EpochNumber | None:
+        """Lowest epoch whose stream still exists, or None if untouched."""
         assert self.redis, "Not initialized"
         val = await self.redis.get(self.low_watermark)
-        return EpochNumber(int(val)) if val else self.start_epoch
+        return EpochNumber(int(val)) if val is not None else None
 
     async def purge_stale_streams(self, up_to_epoch: EpochNumber) -> int:
         """Delete epoch streams below ``up_to_epoch`` and advance ``low_watermark``.
@@ -319,19 +358,21 @@ class HistoricalRedisSink:
         Raises ``RuntimeError`` if any stream has unconsumed data with active
         consumer groups — prevents silent data loss.
 
-        Returns the number of streams purged.
+        Returns the number of streams actually deleted, which is usually
+        fewer than the epochs swept: the range below a window is mostly
+        epochs that were never published here.
         """
         assert self.redis, "Not initialized"
         low_wm = await self.get_low_watermark()
 
-        if low_wm >= up_to_epoch:
+        if low_wm is None or low_wm >= up_to_epoch:
             return 0
 
-        for epoch in range(low_wm, up_to_epoch):
-            await self._assert_safe_to_purge(epoch)
+        swept = range(low_wm, up_to_epoch)
+        present = [epoch for epoch in swept if await self._check_purgeable(epoch)]
 
         pipe = self.redis.pipeline(transaction=True)
-        for epoch in range(low_wm, up_to_epoch):
+        for epoch in swept:
             pipe.delete(f"{self.epoch_stream_prefix}{epoch}")
             pipe.delete(epoch_meta_key(self.prefix, epoch))
             pipe.hdel(self.resume_map, epoch)
@@ -339,18 +380,24 @@ class HistoricalRedisSink:
         pipe.set(self.low_watermark, up_to_epoch)
         await pipe.execute()
 
-        purged = up_to_epoch - low_wm
-        self.logger.info(
-            "Purged %d stale epoch stream(s) (%d–%d); low_watermark → %d",
-            purged,
-            low_wm,
-            up_to_epoch - 1,
-            up_to_epoch,
-        )
-        return purged
+        if present:
+            self.logger.info(
+                "Purged %d stale epoch stream(s) of %d–%d; low_watermark → %d",
+                len(present),
+                low_wm,
+                up_to_epoch - 1,
+                up_to_epoch,
+            )
+        else:
+            self.logger.info(
+                "No epoch streams present below %d; low_watermark → %d",
+                up_to_epoch,
+                up_to_epoch,
+            )
+        return len(present)
 
-    async def _assert_safe_to_purge(self, epoch: int) -> None:
-        """Raise if the epoch stream has unconsumed data.
+    async def _check_purgeable(self, epoch: int) -> bool:
+        """Report whether this epoch has a stream, raising if it is still owed.
 
         Safe to purge when the stream is missing, has no consumer groups
         (orphaned), or is fully consumed. Anything else means a consumer
@@ -360,14 +407,14 @@ class HistoricalRedisSink:
         stream_key = f"{self.epoch_stream_prefix}{epoch}"
 
         if not await self.redis.exists(stream_key):
-            return
+            return False
 
         groups: list[dict[str, Any]] = await self.redis.xinfo_groups(stream_key)
         if not groups:
-            return
+            return True
 
         if await is_stream_fully_consumed(self.redis, stream_key):
-            return
+            return True
 
         raise RuntimeError(
             f"Cannot purge epoch {epoch}: stream {stream_key} has unconsumed "
@@ -379,6 +426,8 @@ class HistoricalRedisSink:
         """Epochs published but not yet consumed (``last_synced - low_watermark``)."""
         last_synced = await self.get_last_synced_epoch()
         low_wm = await self.get_low_watermark()
+        if last_synced is None or low_wm is None:
+            return 0
         return last_synced - low_wm
 
     async def wait_for_backpressure(self) -> None:
@@ -450,14 +499,28 @@ class HistoricalRedisSink:
                 await cleanup
 
     async def get_status(self) -> dict[str, Any]:
+        """Report progress without touching it — this is a read-only call.
+
+        ``ordering_consistent`` checks the one invariant that cannot hold if
+        an ordering base was seeded below a window that was later relayed:
+        ``low_watermark`` may sit at most one epoch above
+        ``last_synced_epoch``, since nothing can be reclaimed before it has
+        been delivered. False means epochs are stranded in ``ready_set``
+        where no consumer bounded by ``last_synced_epoch`` can reach them.
+        """
         assert self.redis, "Not initialized"
+        last_synced = await self.get_last_synced_epoch()
+        low_wm = await self.get_low_watermark()
         return {
-            "last_synced_epoch": await self.get_last_synced_epoch(),
-            "low_watermark": await self.get_low_watermark(),
+            "last_synced_epoch": last_synced,
+            "low_watermark": low_wm,
             "epochs_individually_completed_pending_sync": await self.redis.scard(
                 self.ready_set
             ),
             "epochs_with_active_resume_points": await self.redis.hlen(self.resume_map),
+            "ordering_consistent": (
+                last_synced is None or low_wm is None or low_wm <= last_synced + 1
+            ),
             "redis_connection": "ok",
         }
 

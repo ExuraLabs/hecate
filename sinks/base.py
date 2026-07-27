@@ -67,8 +67,30 @@ class EpochCoordinator(BlockRelay, Protocol):
     epoch, with no resumability and no flow control.
     """
 
-    async def get_last_synced_epoch(self) -> EpochNumber:
-        """Highest epoch N with every epoch through N completed."""
+    async def ensure_ordering_base(self, base: EpochNumber) -> EpochNumber:
+        """Seed the ordering base if untouched, and report the one in force.
+
+        The base is where ordered completion starts counting from. An
+        existing one is returned unchanged rather than overwritten: only the
+        caller knows whether it matches the window about to be relayed, and
+        a mismatch is not something a sink may paper over.
+        """
+        ...
+
+    async def reset_ordering_base(self, base: EpochNumber) -> None:
+        """Move the base, dropping any claim that earlier epochs were sent.
+
+        A deliberate act of scope-narrowing, not a repair — call it only when
+        the epochs being written off are genuinely out of scope.
+        """
+        ...
+
+    async def get_last_synced_epoch(self) -> EpochNumber | None:
+        """Highest epoch N with every epoch through N completed.
+
+        None when nothing has been delivered yet. This is the value
+        consumers bound their reads by.
+        """
         ...
 
     async def get_epoch_resume_height(self, epoch: EpochNumber) -> BlockHeight | None:

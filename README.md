@@ -94,7 +94,9 @@ uv run python -m cli status
 Epochs are fetched concurrently — each in its own process, since block parsing
 is GIL-bound — then committed in ascending order so a consumer reading
 epoch-by-epoch never sees a gap. Progress lives in the sink, so a rerun
-resumes after the last epoch that completed.
+resumes after the last epoch that completed, and a run whose window would leave
+a gap in what consumers can read is
+[refused rather than published](docs/backfill.md#bounded-windows-and-the-ordering-base).
 
 `backfill()` is also usable directly as a library: give it something that
 implements `send_batch` and it will relay blocks into it, no Redis and no CLI

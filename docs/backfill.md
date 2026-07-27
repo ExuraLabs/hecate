@@ -63,14 +63,19 @@ dotenv entries. Any `.env*` file is gitignored.
 - **Resumable**: the run continues after the last epoch already committed, so
   rerunning after a failure picks up where it left off. Progress lives entirely
   in Redis, not in any orchestrator's database.
+- **Windows must be contiguous with what the sink has delivered.** See below.
 - **Retried**: each epoch gets 3 further attempts, 10s apart. Every attempt
   first clears that epoch's stream and resume cursor, so a retry always starts
   from a clean slate rather than appending to a partial epoch.
 - **Fails without publishing garbage**: an epoch that exhausts its retries is
   never marked complete, even though partial blocks may have been written. Its
   siblings in the batch are still committed in order, then the run raises
-  `BackfillError`. `last_synced_epoch` therefore always marks a contiguous,
+  `EpochsFailedError`. `last_synced_epoch` therefore always marks a contiguous,
   consumable prefix, and a rerun re-fetches the failed epoch from scratch.
+- **Never reports success it cannot back up**: before logging completion, the
+  run checks that `last_synced_epoch` actually reached the epoch it relayed to.
+  If it did not, it raises `OrderingStalledError` rather than exiting 0 while
+  consumers can see nothing.
 - **Backpressure**: before each batch, the producer checks how many epoch
   streams are unconsumed. If the gap reaches `REDIS_MAX_UNCONSUMED_EPOCHS` it
   pauses until consumers catch up.
@@ -78,6 +83,55 @@ dotenv entries. Any `.env*` file is gitignored.
   consumer group has acknowledged every entry, advancing `low_watermark`.
 - **Fast block construction**: historical blocks bypass Pydantic validation
   (`fast_block_init`), which is redundant for data already on chain.
+
+## Bounded windows and the ordering base
+
+`last_synced_epoch` is the field consumers bound their reads by, and ordered
+completion advances it **one epoch at a time** — a Lua script walks upward from
+it through `ready_set`. So it can never step over a gap, and a run whose window
+starts above it would publish epochs that sit ready but unreachable forever.
+
+The rule is therefore: **a run relaying from epoch `N` requires
+`last_synced_epoch == N - 1`.** Three cases, all handled up front, before
+anything is written:
+
+| Sink state | What happens |
+|---|---|
+| `last_synced_epoch` unset | Seeded to `N - 1`. Fresh namespace, nothing to reconcile |
+| `last_synced_epoch >= N` | Already delivered that far; the run resumes from `last_synced_epoch + 1` and logs that it did |
+| `last_synced_epoch < N - 1` | **Refused** with `UnreachableWindowError`, naming the gap. Nothing is relayed |
+
+For chunked orchestration this is invisible as long as chunk windows are
+contiguous: chunk `[501, 503]` leaves the base at 503, and chunk `[504, …]`
+lines up exactly.
+
+To relay a **deliberately disjoint** window — declaring the epochs in between
+out of scope, never to be delivered from this sink — pass
+`--rebase-ordering-base`. It moves the base up to `--start-epoch - 1` *after*
+the startup purge has confirmed nothing below the window is still owed to a live
+consumer group, and logs a warning naming the epochs written off. It is an
+assertion about intent, not a repair.
+
+`python -m cli status` is read-only, and reports `ordering consistent`. That
+checks the one invariant this can violate: `low_watermark` may sit at most one
+epoch above `last_synced_epoch`, since nothing is reclaimable before it has been
+delivered. If it reports inconsistent, epochs are stranded in `ready_set` —
+flush the namespace, or relay from `last_synced_epoch + 1`.
+
+## Stream cleanup, and what happens when consumers trail
+
+The cleanup loop runs for the duration of the relay and is cancelled when
+relaying ends — **it does not wait for consumers to drain.** That is
+deliberate: the producer's job is to relay, and blocking its exit on consumer
+progress would stall any orchestrator that runs bounded chunks and needs the
+process to exit before it can checkpoint.
+
+The consequence for a consumer that trails the producer is that `low_watermark`
+stops tracking its acknowledgements once the run ends, and streams it finishes
+with afterwards are reclaimed by the **next** run's `purge_stale_streams` — which
+deletes only streams that are missing, orphaned, or fully consumed, and raises
+rather than dropping anything a live consumer group is still owed. So a chunked
+pipeline should budget for roughly one chunk of streams resident at a time.
 
 ## Redis Integration & State Management
 

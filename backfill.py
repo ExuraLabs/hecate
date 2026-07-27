@@ -79,6 +79,10 @@ Block.__init__ = fast_block_init
 
 
 class BackfillError(RuntimeError):
+    """Base class for every way a backfill can fail."""
+
+
+class EpochsFailedError(BackfillError):
     """One or more epochs could not be relayed, even after retries.
 
     Raised after the surviving epochs in the batch have been committed, so
@@ -90,6 +94,48 @@ class BackfillError(RuntimeError):
         self.failures = failures
         listed = ", ".join(str(epoch) for epoch in sorted(failures))
         super().__init__(f"{len(failures)} epoch(s) failed after retries: {listed}")
+
+
+class UnreachableWindowError(BackfillError):
+    """The sink's ordering base sits below the window we were asked to relay.
+
+    Ordered completion advances one epoch at a time from the base, so it can
+    never step over the gap: every epoch such a run relayed would land in the
+    sink marked ready and stay unreachable, while the run reported success.
+    Refused before anything is written.
+    """
+
+    def __init__(self, *, base: EpochNumber, start_epoch: EpochNumber):
+        self.base = base
+        self.start_epoch = start_epoch
+        super().__init__(
+            f"sink's last_synced_epoch is {base}, but relaying from "
+            f"{start_epoch} needs it at {start_epoch - 1}: epochs "
+            f"{base + 1}–{start_epoch - 1} were never delivered here, so "
+            f"nothing this run published could become visible. Either relay "
+            f"from {base + 1}, or pass rebase_ordering_base=True "
+            f"(--rebase-ordering-base) to write those epochs off as out of "
+            f"scope."
+        )
+
+
+class OrderingStalledError(BackfillError):
+    """Every epoch relayed, but the sink's delivered mark did not reach them.
+
+    A guard against silently publishing data no consumer can reach: the
+    delivered mark is the one field consumers bound their reads by, so a run
+    must never report success while it lags the epochs just written.
+    """
+
+    def __init__(self, *, last_synced: EpochNumber | None, target: EpochNumber):
+        self.last_synced = last_synced
+        self.target = target
+        super().__init__(
+            f"relayed through epoch {target}, but the sink reports "
+            f"last_synced_epoch={last_synced}: epochs are stranded where no "
+            f"consumer can read them. This is a bug, not a config problem — "
+            f"please report the sink's status output."
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,7 +378,7 @@ async def _run_batch(pool: ProcessPoolExecutor, batch: _Batch) -> None:
     )
 
     if batch.failures:
-        raise BackfillError(batch.failures)
+        raise EpochsFailedError(batch.failures)
 
 
 async def _resolve_target_and_boundaries(
@@ -409,6 +455,7 @@ async def backfill(
     concurrency: int | None = None,
     endpoints: Sequence[str] | None = None,
     kupo_url: str | None = None,
+    rebase_ordering_base: bool = False,
     retries: int = DEFAULT_RETRIES,
     retry_delay_seconds: float = DEFAULT_RETRY_DELAY_SECONDS,
     log_level: int = logging.INFO,
@@ -424,10 +471,10 @@ async def backfill(
     :param sink_factory: Builds an unopened sink. Called once in this
         process and once per epoch in each worker process, so it must be
         picklable — a sink class or a ``functools.partial`` of one.
-        A coordinating sink's own ``start_epoch`` is its business; pass the
-        same value to both if you want its watermarks seeded to match.
     :param start_epoch: First epoch to relay. Ignored in favour of the
-        resume point when the sink is further along already.
+        resume point when the sink is further along already. A coordinating
+        sink whose delivered mark sits *below* this is refused rather than
+        stepped over — see ``rebase_ordering_base``.
     :param end_epoch: Last epoch to relay (inclusive). Defaults to — and is
         clamped to — the last finalized epoch, read live from the chain.
     :param batch_size: Blocks per ``send_batch`` call. Defaults to
@@ -437,13 +484,22 @@ async def backfill(
         ``OGMIOS_ENDPOINTS`` from the environment.
     :param kupo_url: Optional kupo endpoint, which accelerates deriving
         boundary data for epochs absent from the committed CSVs.
+    :param rebase_ordering_base: Allow a window that starts above the sink's
+        delivered mark, moving the mark up to meet it. This declares the
+        epochs in between out of scope — they will never be delivered from
+        this sink — so it is an assertion about intent, not a repair.
     :param retries: Extra attempts per epoch after the first failure.
     :param retry_delay_seconds: Wait between attempts.
     :param log_level: Level worker processes configure logging at.
     :return: The last epoch in the relayed range, or None if there was
         nothing to do.
-    :raises BackfillError: if any epoch failed every attempt. Epochs that
+    :raises UnreachableWindowError: if the sink's delivered mark sits below
+        the window and ``rebase_ordering_base`` was not given. Nothing is
+        written; the run could not have become visible.
+    :raises EpochsFailedError: if any epoch failed every attempt. Epochs that
         succeeded are committed first, so a rerun resumes cleanly.
+    :raises OrderingStalledError: if the relayed epochs did not become
+        visible. A bug guard; it should be unreachable.
     """
     run_start = time.perf_counter()
     batch_size = batch_size or settings.BATCH_SIZE
@@ -460,19 +516,44 @@ async def backfill(
             await stack.enter_async_context(coordinator)
 
         if coordinator:
-            last_synced = await coordinator.get_last_synced_epoch()
-            if last_synced > start_epoch:
+            # Ordered completion counts up one epoch at a time from this base,
+            # so the window has to start exactly where the base leaves off.
+            base = await coordinator.ensure_ordering_base(EpochNumber(start_epoch - 1))
+            rebase_needed = False
+
+            if base >= start_epoch:
+                # The sink is already past the requested start — including the
+                # case base == start_epoch, where that epoch is done and
+                # re-relaying it would strand a duplicate.
                 logger.info(
                     "🔄 Resuming after last synced epoch %d instead of %d",
-                    last_synced,
+                    base,
                     start_epoch,
                 )
-                start_epoch = EpochNumber(last_synced + 1)
+                start_epoch = EpochNumber(base + 1)
+            elif base < start_epoch - 1:
+                if not rebase_ordering_base:
+                    raise UnreachableWindowError(base=base, start_epoch=start_epoch)
+                rebase_needed = True
 
             # Purge orphaned epoch streams below start_epoch from prior
             # overlapping runs. Without this, streams that no consumer will
             # ever read (0 consumer groups) block backpressure indefinitely.
+            # It also refuses to drop anything a live consumer group is still
+            # owed, which is what makes the rebase below safe to do after it.
             await coordinator.purge_stale_streams(start_epoch)
+
+            if rebase_needed:
+                logger.warning(
+                    "⚠️  Moving last_synced_epoch %d → %d: epochs %d–%d are "
+                    "written off as out of scope and will never be delivered "
+                    "from this sink",
+                    base,
+                    start_epoch - 1,
+                    base + 1,
+                    start_epoch - 1,
+                )
+                await coordinator.reset_ordering_base(EpochNumber(start_epoch - 1))
 
         target, boundaries, counts = await _resolve_target_and_boundaries(
             end_epoch, network_manager.get_connection(), kupo_url
@@ -529,6 +610,13 @@ async def backfill(
                             coordinator=coordinator,
                         ),
                     )
+
+        if coordinator:
+            # Never report success while contradicting the field consumers
+            # read: every epoch relayed above must be visible by now.
+            delivered = await coordinator.get_last_synced_epoch()
+            if delivered is None or delivered < target:
+                raise OrderingStalledError(last_synced=delivered, target=target)
 
     logger.info(
         "🏁 Backfill complete through epoch %d in %.2fs",
