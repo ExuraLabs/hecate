@@ -86,6 +86,27 @@ dotenv entries. Any `.env*` file is gitignored.
 - **Fast block construction**: historical blocks bypass Pydantic validation
   (`fast_block_init`), which is redundant for data already on chain.
 
+## Exit codes
+
+Driving `backfill` as a subprocess? Classify on the exit code. The message text
+is written to be read by a person and may be reworded; the codes will not
+change.
+
+| Code | Class | What it means | Remedy |
+|---|---|---|---|
+| 0 | — | Relayed, and visible to consumers | — |
+| 10 | `EpochsFailedError` | An epoch exhausted its retries | **Retryable.** Rerun; it resumes |
+| 11 | `UnreachableWindowError` | The window starts above the sink's delivered mark | Relay from `last_synced_epoch + 1`, or `--rebase-ordering-base` |
+| 12 | `NoRegisteredConsumerError` | Published epochs below the window that nothing has registered to read | A consumer must register — retrying alone changes nothing. Or `--purge-orphans` |
+| 13 | `ConsumerNotFinishedError` | A registered consumer has not drained those epochs yet | Wait for it, then retry |
+| 14 | `OrderingStalledError` | Relayed, but not visible. A bug | Capture `status` and report it |
+| 130 | — | Interrupted | Rerun; it resumes |
+
+All of these subclass `errors.BackfillError`, and both purge failures subclass
+`errors.UnsafePurgeError`, so a library caller can catch at whatever granularity
+it needs. Codes start at 10 to stay clear of 1 and 2, which the shell and Click
+already spend on generic and usage failures.
+
 ## Bounded windows and the ordering base
 
 `last_synced_epoch` is the field consumers bound their reads by, and ordered

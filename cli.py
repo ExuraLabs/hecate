@@ -190,10 +190,12 @@ def backfill(
             )
         )
     except BackfillError as exc:
-        # Per-epoch failures are already logged; window and ordering problems
-        # carry their whole explanation in the message.
+        # Per-epoch failures are already logged; window, purge and ordering
+        # problems carry their whole explanation in the message. The exit code
+        # is per failure class, so a caller driving this as a subprocess can
+        # tell them apart without parsing English — see `errors`.
         console.print(f"[bold red]Backfill incomplete:[/] {exc}")
-        raise typer.Exit(code=1) from None
+        raise typer.Exit(code=exc.exit_code) from None
     except KeyboardInterrupt:
         console.print("[yellow]Interrupted.[/] Rerun to resume.")
         raise typer.Exit(code=130) from None

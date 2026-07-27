@@ -10,7 +10,7 @@ import orjson as json
 from ogmios import Block
 
 from config import settings
-from errors import UnsafePurgeError
+from errors import ConsumerNotFinishedError, NoRegisteredConsumerError
 from models import BlockHeight, EpochNumber
 from sinks.base import prepare_block
 from sinks.metrics import MetricsClient, epoch_meta_key, heartbeat
@@ -460,26 +460,12 @@ class HistoricalRedisSink:
         if not groups:
             if purge_orphans:
                 return _StreamState.ORPHANED
-            raise UnsafePurgeError(
-                epoch,
-                stream_key,
-                "it holds data but no consumer group has registered. A "
-                "consumer that has not started yet looks exactly like one "
-                "that never will, so this is not assumed to be abandoned. "
-                "Start the consumers that should read it, or pass "
-                "purge_orphans=True (--purge-orphans) to drop it.",
-            )
+            raise NoRegisteredConsumerError(epoch, stream_key)
 
         if await is_stream_fully_consumed(self.redis, stream_key):
             return _StreamState.CONSUMED
 
-        raise UnsafePurgeError(
-            epoch,
-            stream_key,
-            f"it has unconsumed data with {len(groups)} active consumer "
-            f"group(s). Let consumers finish, or FLUSHDB to start from "
-            f"scratch.",
-        )
+        raise ConsumerNotFinishedError(epoch, stream_key, len(groups))
 
     async def _consumer_lag(self) -> int:
         """Epochs published but not yet consumed (``last_synced - low_watermark``)."""

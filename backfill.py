@@ -37,7 +37,9 @@ from epoch_cache import extend_cache, load_cache
 from epoch_derivation import regenerate_range
 from errors import (
     BackfillError,
+    ConsumerNotFinishedError,
     EpochsFailedError,
+    NoRegisteredConsumerError,
     OrderingStalledError,
     UnreachableWindowError,
     UnsafePurgeError,
@@ -52,8 +54,10 @@ logger = logging.getLogger(__name__)
 # `errors` so that catching what `backfill()` raises needs one import, not two.
 __all__ = [
     "BackfillError",
+    "ConsumerNotFinishedError",
     "EpochJob",
     "EpochsFailedError",
+    "NoRegisteredConsumerError",
     "OrderingStalledError",
     "SinkFactory",
     "UnreachableWindowError",
