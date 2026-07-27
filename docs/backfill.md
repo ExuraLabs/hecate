@@ -44,7 +44,7 @@ dotenv entries. Any `.env*` file is gitignored.
 |---|---|---|
 | `OGMIOS_ENDPOINTS` | `["ws://localhost:1337"]` | JSON array of endpoints, rotated round-robin |
 | `REDIS_URL` | `redis://localhost:6379/0` | Where the Redis sink writes |
-| `REDIS_MAX_UNCONSUMED_EPOCHS` | `10` | Backpressure threshold |
+| `REDIS_MAX_UNCONSUMED_EPOCHS` | `5` | Backpressure threshold |
 | `BATCH_SIZE` | `500` | Blocks per batch sent to the sink |
 | `KUPO_URL` | — | Accelerates on-demand epoch derivation |
 
@@ -191,10 +191,10 @@ it is bounded by cores: a CPU-count default puts 8–16 epochs in flight on host
 that routinely have 16 GB. Raise it deliberately, against a sink sized for the
 extra resident epochs.
 
-Note that `REDIS_MAX_UNCONSUMED_EPOCHS` (default 10) is the larger term in that
-sum for most configurations — it alone allows ~6–20 GiB of published-but-
-unconsumed epochs before backpressure engages. Size it together with
-`--concurrency`, not separately.
+`REDIS_MAX_UNCONSUMED_EPOCHS` (default 5) is the other half of that sum and is
+often the larger one — size the two together, not separately. On an 8-core host
+the defaults come to about 9 resident epochs: ~5.7 GiB in Babbage, 9–18 GiB
+through Alonzo.
 
 Cap the sink's Redis with `maxmemory` and `noeviction`: an oversized run then
 fails a write mid-epoch instead of taking the host's memory, and eviction on

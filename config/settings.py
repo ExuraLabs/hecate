@@ -75,7 +75,9 @@ OGMIOS_ENDPOINTS: tuple[str, ...] = _env_json_str_tuple(
 REDIS_URL: str = _env_str("REDIS_URL", "redis://localhost:6379/0")
 
 #: Published-but-unconsumed epochs tolerated before a backfill pauses.
-REDIS_MAX_UNCONSUMED_EPOCHS: int = _env_int("REDIS_MAX_UNCONSUMED_EPOCHS", 10)
+#: Together with ``--concurrency`` this sets how much Redis a run occupies —
+#: each resident epoch is 0.6–2 GiB — so the default is deliberately modest.
+REDIS_MAX_UNCONSUMED_EPOCHS: int = _env_int("REDIS_MAX_UNCONSUMED_EPOCHS", 5)
 
 #: Blocks per batch handed to a sink.
 BATCH_SIZE: int = _env_int("BATCH_SIZE", 500)
