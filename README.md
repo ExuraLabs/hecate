@@ -171,11 +171,41 @@ hecate/
 │   ├── redis         # Redis sink for downstream service(s)
 │   └── cli           # CLI sink for command line output
 ├── constants         # Constant values and configurations
-└── models            # Data models and type definitions
+├── models            # Data models and type definitions
+└── tests/            # Test suite (see Development, below)
 ```
 
 ## Development
 
+### Tests
+
+```bash
+# The suite that needs no chain access
+uv run pytest
+
+# All of it, including the tests that relay real blocks
+HECATE_TEST_OGMIOS=ws://your-server:1337 uv run pytest
+```
+
+The tests exercise the real Redis sink, so they need a Redis they are allowed
+to empty. Supply one however suits the machine:
+
+```bash
+# bring your own — a container, a remote instance, anything
+docker run --rm -d -p 6390:6379 redis:8-alpine
+HECATE_TEST_REDIS_URL=redis://localhost:6390/0 uv run pytest
+```
+
+Without `HECATE_TEST_REDIS_URL` the suite starts and owns a private
+`redis-server` on a free port, if that binary happens to be installed. If a
+given database is not empty the run stops before touching it, and one the
+suite borrowed is handed back empty.
+
+Everything degrades to skips rather than errors: no Redis to be had, or an
+install without the `redis` dependency group, and the suite reports why and
+passes. The tests that must see blocks move ask for an Ogmios endpoint the
+same way; the rest — window refusals, purge safety, `status` — run against
+faked sink state and finish in seconds.
 
 ### Type Checking and Linting
 

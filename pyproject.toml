@@ -17,6 +17,7 @@ dev = [
     "ipdb>=0.13.13",
     "mypy>=1.15.0",
     "pre-commit>=4.2.0",
+    "pytest>=8.4.2",
     "pytest-stub>=1.1.0",
     "ruff>=0.11.9",
     "types-requests>=2.32.0.20250328",
@@ -30,6 +31,12 @@ redis = [
 # releases, and a lint set that changes under you on an unrelated upgrade
 # turns every dependency bump into a refactor. Add rules deliberately.
 select = ["E4", "E7", "E9", "F"]
+
+[tool.pytest.ini_options]
+# The suite imports the modules it tests from the repo root, which is not on
+# sys.path by default under a flat layout.
+pythonpath = ["."]
+testpaths = ["tests"]
 
 [tool.mypy]
 strict = true
