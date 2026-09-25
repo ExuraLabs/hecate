@@ -1,8 +1,9 @@
-"""Failures a backfill can raise.
+"""Failures a backfill or a live follow can raise.
 
 One hierarchy, in one module, so ``except BackfillError`` catches everything a
-run can fail with — including the failures raised from inside a sink, which is
-why these do not live in ``backfill.py``.
+backfill can fail with and ``except FollowError`` everything a follow can —
+including the failures raised from inside a sink, which is why these do not
+live beside an entry point.
 
 Each class carries the process exit code the CLI uses for it. **That code is
 the stable contract for anything driving Hecate as a subprocess** — the message
@@ -13,8 +14,8 @@ code, not on the prose.
 from models import EpochNumber
 
 
-class BackfillError(RuntimeError):
-    """Base class for every way a backfill can fail.
+class HecateError(RuntimeError):
+    """Root of every failure Hecate reports with its own exit code.
 
     Exit codes start at 10 to stay clear of 1 and 2, which the shell and
     Click already spend on generic and usage failures.
@@ -22,6 +23,10 @@ class BackfillError(RuntimeError):
 
     #: Process exit code the CLI reports for this failure.
     exit_code: int = 1
+
+
+class BackfillError(HecateError):
+    """Base class for every way a backfill can fail."""
 
 
 class EpochsFailedError(BackfillError):
@@ -144,10 +149,34 @@ class ConsumerNotFinishedError(UnsafePurgeError):
         )
 
 
+class FollowError(HecateError):
+    """Base class for every way a live follow can stop short of being told to.
+
+    Codes continue where the backfill's leave off.
+    """
+
+
+class ChainLinkError(FollowError):
+    """A block or rollback does not fit the chain relayed so far.
+
+    Each block names its predecessor; one naming anything else, or a rollback
+    to a point that cannot be on the chain relayed so far, means the upstream
+    broke the chain-sync contract. Nothing is published from the break onwards.
+    """
+
+    exit_code = 18
+
+    def __init__(self, detail: str):
+        super().__init__(f"chain-link violation: {detail}")
+
+
 __all__ = [
     "BackfillError",
+    "ChainLinkError",
     "ConsumerNotFinishedError",
     "EpochsFailedError",
+    "FollowError",
+    "HecateError",
     "NoRegisteredConsumerError",
     "OrderingStalledError",
     "UnreachableWindowError",

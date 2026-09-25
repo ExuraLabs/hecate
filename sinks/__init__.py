@@ -1,6 +1,13 @@
 import logging
 
-from .base import BlockRelay, BufferedSink, DataSink, EpochCoordinator, prepare_block
+from .base import (
+    BlockRelay,
+    BufferedSink,
+    DataSink,
+    EpochCoordinator,
+    RollbackRelay,
+    prepare_block,
+)
 from .cli import CLISink
 
 logger = logging.getLogger("hecate.sinks")
@@ -11,6 +18,7 @@ __all__ = [
     "CLISink",
     "DataSink",
     "EpochCoordinator",
+    "RollbackRelay",
     "prepare_block",
 ]
 # Conditionally import the Redis sinks

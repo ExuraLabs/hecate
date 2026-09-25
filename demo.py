@@ -57,11 +57,11 @@ async def run_demo() -> None:
         # Send batch to sink
         await sink.send_batch(batch)
 
-        # Wrap the sink in a BufferedSink to handle rollbacks
-        buffered = BufferedSink(sink, confirmation_depth=3)
-        console.print(
-            f"[bold yellow]Test {buffered.confirmation_depth}-block buffer...[/]"
-        )
+        # Wrap the sink in a BufferedSink to handle rollbacks. Its base is the
+        # last block relayed so far: the next one must name it as ancestor.
+        last = batch[-1]
+        buffered = BufferedSink(sink, base=Point(slot=last.slot, id=last.id), depth=3)
+        console.print(f"[bold yellow]Test {buffered.depth}-block buffer...[/]")
 
         # Grab a few more blocks - these will be buffered
         batch = await client.next_block.batched(batch_size=3)
@@ -81,17 +81,16 @@ async def run_demo() -> None:
 
         # Notify the sink about rollback
         console.print("[bold cyan]⏪ Rolling back buffered blocks...[/]")
-        await buffered.rollback_to_slot(rollback_point.slot)
+        await buffered.rollback_to(rollback_point)
 
         # Get new blocks after rollback
         console.print("[bold blue]▶️ Resuming sync after rollback...[/]")
         new_batch = await client.next_block.batched(batch_size=2)
         await buffered.send_batch(new_batch)
 
-        status = await buffered.get_status()
         console.print(
-            "[bold yellow]📊 Last confirmed slot:[/] "
-            f"[bold]{status['buffer']['last_confirmed_slot']}[/]"
+            "[bold yellow]📊 Last relayed slot:[/] "
+            f"[bold]{buffered.base.slot}[/], holding {len(buffered.held)} more"
         )
         console.print("[bold green]✅ Demo completed successfully! ✅[/]")
 
