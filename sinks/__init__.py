@@ -24,8 +24,9 @@ __all__ = [
 # Conditionally import the Redis sinks
 try:
     from .redis import HistoricalRedisSink, RedisSink
+    from .redis_live import RedisLiveSink
 
-    __all__ += ["HistoricalRedisSink", "RedisSink"]
+    __all__ += ["HistoricalRedisSink", "RedisLiveSink", "RedisSink"]
 except ImportError:
     logger.info(
         "Redis support is not available. "

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import ogmios.response_handler as rh
-from ogmios import Block, Point
+from ogmios import Block, Point, Tip
 
 # Builds blocks the way the backfill does, so the test's blocks match what it
 # would construct from the same JSON.
@@ -32,6 +32,10 @@ class FakeBlock:
     @property
     def point(self) -> Point:
         return Point(slot=self.slot, id=self.hash)
+
+    @property
+    def tip(self) -> Tip:
+        return Tip(slot=self.slot, id=self.hash, height=self.height)
 
     def as_json(self) -> dict[str, Any]:
         """A praos block as Ogmios v6 renders one, with one transaction."""

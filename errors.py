@@ -156,6 +156,43 @@ class FollowError(HecateError):
     """
 
 
+class FencedOutError(FollowError):
+    """This follower may no longer write to the stream.
+
+    Every write re-checks that the follower still holds the lease and that the
+    stream's tail is where this follower left it. Either failing means another
+    writer may have moved the stream, so nothing this process believes about
+    the tail can be trusted. Restarting is the remedy: the new process waits as
+    standby and re-reads the tail if it takes over.
+    """
+
+    exit_code = 16
+
+
+class LeaseLostError(FencedOutError):
+    """The producer lease expired or is held by another follower."""
+
+    def __init__(self, *, producer_id: str, holder: str | None):
+        self.producer_id = producer_id
+        self.holder = holder
+        held = f"is held by {holder}" if holder else "has expired"
+        super().__init__(
+            f"the producer lease {held}; {producer_id} is no longer the writer"
+        )
+
+
+class TailMovedError(FencedOutError):
+    """The stream's tail is not where this follower last wrote it."""
+
+    def __init__(self, *, expected: str, found: str | None):
+        self.expected = expected
+        self.found = found
+        super().__init__(
+            f"the stream's tail is {found or 'unset'}, not {expected}: "
+            f"something other than this follower wrote to it"
+        )
+
+
 class ChainLinkError(FollowError):
     """A block or rollback does not fit the chain relayed so far.
 
@@ -175,10 +212,13 @@ __all__ = [
     "ChainLinkError",
     "ConsumerNotFinishedError",
     "EpochsFailedError",
+    "FencedOutError",
     "FollowError",
     "HecateError",
+    "LeaseLostError",
     "NoRegisteredConsumerError",
     "OrderingStalledError",
+    "TailMovedError",
     "UnreachableWindowError",
     "UnsafePurgeError",
 ]
