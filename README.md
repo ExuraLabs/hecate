@@ -14,7 +14,7 @@
 
 Hecate is an independent data relay service that connects through Ogmios and efficiently fetches both historical and real-time on-chain data.<br>
 Named after the Greek goddess of magic, crossroads, and keeper of keys, Hecate serves as a bridge between the chain and downstream processing systems via standardized interfaces, focusing exclusively on reliable data acquisition and transmission through well-defined API boundaries, enabling integration with any system that needs to track on-chain data.
-While its main use case is to forward data via Redis, it can also be configured to output to the command line interface (CLI) for debugging or testing purposes.
+What it relays lands in a sink, and the sink decides what downstream sees: Hecate ships one that prints to the command line (CLI) for debugging or testing, and Redis sinks that write streams or a list; a message queue or a database would be a sink of its own.
 
 ### NOTE: This project is in early development and is not yet ready for production use. Please use at your own risk.
 
@@ -29,8 +29,8 @@ While its main use case is to forward data via Redis, it can also be configured 
 │  │   Async     │     │  Core Processing           │     │  Data Sinks      │  │
 │  │   Client    │◄───►│                            │◄───►│                  │  │
 │  │             │     │  ┌──────────┐ ┌─────────┐  │     │ ┌────────┐       │  │
-│  └─────────────┘     │  │ Backfill │ │ Relay   │  │     │ │Redis   │       │  │
-│         ▲            │  │(historic)│ │(planned)│  │     │ │Sink    │       │  │
+│  └─────────────┘     │  │ Backfill │ │ Follow  │  │     │ │Redis   │       │  │
+│         ▲            │  │(historic)│ │ (tip)   │  │     │ │Sinks   │       │  │
 │         │            │  └──────────┘ └─────────┘  │     │ └────────┘       │  │
 │         │            │                            │     │ ┌────────┐       │  │
 │         │            │             ▲              │     │ │CLI     │       │  │
@@ -55,12 +55,14 @@ Hecate consists of:
 1. **Ogmios Client** - Asynchronous client for the Ogmios WebSocket API
 2. **Data Relay** - Efficiently forward blockchain data with minimal transformation
 3. **Backfill Core** - A plain `asyncio` coroutine that fetches epochs concurrently, driven by a thin CLI
-4. **Redis Integration** - Stream block data to downstream consumers via per-epoch Redis streams
+4. **Live Follow** - A plain `asyncio` coroutine that stays at the chain tip, holding the newest blocks back so shallow rollbacks never reach its sink, driven by the same CLI
+5. **Sinks** - Where relayed blocks land: the command line, per-epoch Redis streams or a Redis list for the backfill, and the Redis live stream for the live follow
 
 ## Features
 
 - ⚡ **Parallel Historical Fetching** - Efficiently fetch the entire blockchain history in batches
-- 🔄 **Real-time Data Relay** - Stay current with the latest blocks and relay them to Redis or CLI
+- 🔄 **Real-time Data Relay** - Follow the chain tip block by block, rollbacks included
+- 🧩 **Pluggable Sinks** - The backfill relays into anything that implements `send_batch`; CLI and Redis sinks ship with Hecate
 - 🛡️ **Reorg Detection** - Catch chain reorganizations early and handle them gracefully
 - 🪶 **No Orchestrator** - Just `asyncio` and a CLI; progress lives in the sink, not an engine's database
 - 🔁 **Resumable** - Rerun after a failure and it continues from the last completed epoch
@@ -89,6 +91,9 @@ uv run python -m cli backfill --start-epoch 208 --end-epoch 208 --sink cli
 
 # How far along is the Redis sink?
 uv run python -m cli status
+
+# Follow the chain tip into the Redis live stream, starting an empty one at an epoch
+uv run python -m cli follow --from-epoch 650 --kupo-url http://localhost:1442
 ```
 
 Epochs are fetched concurrently — each in its own process, since block parsing
@@ -102,9 +107,13 @@ a gap in what consumers can read is
 implements `send_batch` and it will relay blocks into it, no Redis and no CLI
 involved. **[See the detailed backfill documentation](docs/backfill.md)**.
 
-A `relay` command that follows the chain tip live is planned; the realtime
-client machinery it will build on (`client/chainsync`, `sinks.base.BufferedSink`)
-already exists.
+`follow` stays at the tip instead: it relays every block as the node adopts
+it, holding the newest few back so that shallow rollbacks never reach its sink
+and deeper ones reach it as rollbacks. Its sink is the Redis live stream, one
+stream any number of consumers read; the lease that lets a second follower
+wait as a warm standby, and the tail a restarted follower resumes from, are
+that sink's. **[See the live follow documentation](docs/follow.md)**, and the
+[Redis live stream's contract](docs/live-stream.md) for its consumers.
 
 Epoch boundaries and block counts are derived directly from the chain over the
 same Ogmios connection used for streaming (see `epoch_derivation.py`), with an

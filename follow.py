@@ -25,6 +25,7 @@ import logging
 from collections.abc import Coroutine, Sequence
 from typing import Any
 
+import requests
 from ogmios import Block, Point, Tip
 from redis.exceptions import RedisError
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
@@ -33,9 +34,9 @@ from backfill import fast_block_init
 from client import HecateClient
 from client.chainsync import RollForward
 from constants import DEFAULT_LIVE_NAMESPACE
-from epoch_derivation import SHELLEY_EPOCH_LENGTH
+from epoch_derivation import SHELLEY_EPOCH_LENGTH, epoch_start_slot, kupo_point_at
 from errors import IntersectionNotFoundError, StartPointRefusedError, TailMovedError
-from models import BlockHash, Slot
+from models import BlockHash, EpochNumber, Slot
 from network import NetworkManager
 from sinks.base import BufferedSink
 from sinks.redis_live import LivePolicy, RedisLiveSink
@@ -51,6 +52,7 @@ __all__ = [
     "DEFAULT_IN_FLIGHT",
     "DEFAULT_MAX_CATCHUP_EPOCHS",
     "follow",
+    "resolve_start_point",
 ]
 
 #: Blocks held back from the stream until that many have been built on them.
@@ -73,6 +75,46 @@ _NODE_BEHIND_POLL_SECONDS = 10.0
 
 #: Transport failures: reconnect and re-intersect, never exit.
 _TRANSIENT = (ConnectionClosed, InvalidHandshake, OSError, TimeoutError)
+
+
+def resolve_start_point(
+    *,
+    point: Point | None = None,
+    slot: int | None = None,
+    epoch: int | None = None,
+    kupo_url: str | None = None,
+) -> Point | None:
+    """Turn an explicit start request into the point to intersect at.
+
+    At most one of the three may be given. A point is taken as is; a slot is
+    the last block at or before it, and an epoch the last block before it
+    starts — both found through kupo, so the first block relayed is the one
+    right after. None when nothing was asked for.
+
+    :raises ValueError: for more than one request, or a slot or epoch without
+        ``kupo_url``.
+    :raises StartPointRefusedError: if kupo cannot resolve the slot.
+    """
+    given = [value for value in (point, slot, epoch) if value is not None]
+    if len(given) > 1:
+        raise ValueError("give at most one of a start point, slot or epoch")
+    if point is not None:
+        return point
+    if slot is not None:
+        target = Slot(slot)
+    elif epoch is not None:
+        target = Slot(epoch_start_slot(EpochNumber(epoch)) - 1)
+    else:
+        return None
+    if kupo_url is None:
+        raise ValueError("a start slot or epoch is resolved through kupo")
+
+    try:
+        return kupo_point_at(kupo_url, target)
+    except (requests.RequestException, LookupError, ValueError) as exc:
+        raise StartPointRefusedError(
+            f"kupo could not resolve slot {target} to a block: {exc}"
+        ) from exc
 
 
 async def follow(
@@ -378,6 +420,6 @@ class _Relay:
                 f"{_describe(point)} is {behind} slots "
                 f"({behind / SHELLEY_EPOCH_LENGTH:.1f} epochs) behind the node's "
                 f"tip at {tip.slot}, past the {self.max_catchup_epochs} epoch(s) "
-                f"max_catchup_epochs allows. Relay that stretch with backfill, "
+                f"--max-catchup-epochs allows. Relay that stretch with backfill, "
                 f"or raise the limit for this start"
             )

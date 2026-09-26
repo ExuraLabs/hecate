@@ -155,7 +155,10 @@ class ConsumerNotFinishedError(UnsafePurgeError):
 class FollowError(HecateError):
     """Base class for every way a live follow can stop short of being told to.
 
-    Codes continue where the backfill's leave off.
+    Codes continue where the backfill's leave off. A supervisor should restart
+    on ``FencedOutError`` (the restarted follower waits as standby) and on any
+    code outside this hierarchy; the rest need a person, because restarting
+    would only repeat them.
     """
 
 

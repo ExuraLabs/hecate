@@ -12,7 +12,7 @@ This page is that stream's consumer contract, **v1**: the producer is the only
 writer, and consumers may rely on everything it states. It also covers what
 `follow` relies on this sink for beyond delivery — where a run starts, the
 producer lease, backpressure and retention — with each knob named by the
-`LivePolicy` field or `follow()` parameter that sets it.
+[option](follow.md#knobs) that sets it.
 
 ## The stream (contract v1)
 
@@ -74,7 +74,7 @@ absent.
 |`paused`|`1` while paused under backpressure, else `0`|
 |`paused_since`|Unix seconds the pause began, or empty|
 
-A heartbeat older than a few `heartbeat_seconds` means no producer is
+A heartbeat older than a few `--heartbeat-seconds` means no producer is
 alive. `tip_slot` far ahead of `last_slot` means one is catching up.
 
 ### `{ns}:producer` — the lease
@@ -101,10 +101,10 @@ A consumer that has not read an entry of this stream yet — one anchored at the
 end of a backfill, say — writes `entry_id` as `""` or `null`. While active, it
 pins the block entry at or before its `slot` against trimming, or the whole
 stream when the stream holds nothing that early. One waiting ahead of the
-stream pins nothing but what `retain_blocks` keeps anyway.
+stream pins nothing but what `--retain-blocks` keeps anyway.
 
 A registration the producer cannot read (not JSON, or missing `slot`, `hash`,
-`entry_id` or `updated_at`) stops the producer: it cannot bound
+`entry_id` or `updated_at`) stops the producer with exit 1: it cannot bound
 retention around a consumer whose position it does not know.
 
 ### Fencing
@@ -114,7 +114,7 @@ Every write the producer makes to `{ns}:stream`, `{ns}:slots` or
 still its own `producer_id`, and, for a block, that `state.last_hash` is the
 block's `ancestor` (for a rollback, that the tail is the one this producer
 last wrote and the point lies below it). Either check failing aborts the write
-before anything changes, and the producer stops with `FencedOutError`.
+before anything changes, and the follower exits 16.
 
 Two followers can momentarily see two different forks, and a stalled follower
 can resume believing it still holds a lease that lapsed. The lease plus the
@@ -126,15 +126,18 @@ write is refused, whatever it believes.
 On its first connection a follower picks where to start, in this order:
 
 1. **A non-empty stream resumes from its canonical tail.** An explicit start
-   is then accepted only if it names that exact tail; any other point is
-   refused (`StartPointRefusedError`), because publishing from it would break
-   the order invariant. So an explicit start is for the first run of a
-   namespace only.
-2. **An empty stream with an explicit start** begins there. The first block
-   published is the one right after the point, and names it as `ancestor`.
+   option is then accepted only if it names that exact tail; any other point
+   exits 17, because publishing from it would break the order invariant. So
+   start options are for the first run of a namespace — never bake one into a
+   command that is restarted.
+2. **An empty stream with an explicit start** begins there. `--from-point`
+   is taken as given; `--from-slot` is the last block at or before that slot
+   and `--from-epoch` the last block before the epoch starts, both found
+   through kupo's `/checkpoints/{slot}`. The first block published is the one
+   right after the point, and names it as `ancestor`.
 3. **An empty stream with registered consumers** begins at the lowest-slot
    anchor among them, active or stale.
-4. **Otherwise** it is refused (`StartPointRefusedError`).
+4. **Otherwise** it exits 17.
 
 It then asks Ogmios to intersect:
 
@@ -146,25 +149,24 @@ It then asks Ogmios to intersect:
 - If the intersection is **below the tail**, the tail was orphaned while
   nobody was relaying. A `rollback` entry to the intersection is published
   first, then relaying resumes from there.
-- If the node holds none of the points **and its tip is past them**, it stops
-  with `IntersectionNotFoundError`. If its tip is **behind** the newest point
-  offered, the node is still syncing: the follower waits and asks again every
-  10 seconds, writing nothing. The same holds for an intersection below the
-  tail while the node's tip is behind the tail: a node that has not reached
-  the tail yet is not evidence of a fork.
-- `max_catchup_epochs` (default 2) bounds how far behind the node's tip the
+- If the node holds none of the points **and its tip is past them**, it exits
+  15. If its tip is **behind** the newest point offered, the node is still
+  syncing: the follower waits and asks again every 10 seconds, writing
+  nothing. The same holds for an intersection below the tail while the node's
+  tip is behind the tail: a node that has not reached the tail yet is not
+  evidence of a fork.
+- `--max-catchup-epochs` (default 2) bounds how far behind the node's tip the
   start may be. It applies when a follower starts, including when it resumes
   a stream after downtime; reconnects while running are not bounded. Past it,
-  the start is refused (`StartPointRefusedError`) before anything is written:
-  the live path is one entry per block for every consumer to replay, and a
-  stretch of epochs is what the backfill is for. Raise it deliberately for a
-  single start.
+  the follower exits 17 before writing anything: the live path is one entry
+  per block for every consumer to replay, and a stretch of epochs is what the
+  backfill is for. Raise it deliberately for a single start.
 
 ## Backpressure
 
 A consumer is **active** if its `updated_at` is within
-`active_consumer_seconds` (default 600). The producer pauses fetching while
-the **slowest active consumer's anchor** is more than `max_unconsumed_blocks`
+`--active-consumer-seconds` (default 600). The producer pauses fetching while
+the **slowest active consumer's anchor** is more than `--max-unconsumed-blocks`
 (default 10 000) block entries behind the tail, counted as the `{ns}:slots`
 members above the anchor's slot. While paused it sets `paused=1` and
 `paused_since`, keeps heartbeating, and re-reads the lag every heartbeat.
@@ -174,7 +176,7 @@ published blocks, so a follower catching up can overshoot the limit by up to
 that much before it pauses.
 
 A stream **no consumer has registered on** counts every block entry as
-unconsumed: it pauses once it holds `max_unconsumed_blocks`, and resumes
+unconsumed: it pauses once it holds `--max-unconsumed-blocks`, and resumes
 when the first consumer registers. So a follower started ahead of its
 consumers waits for them instead of racing ahead of what retention keeps.
 
@@ -187,10 +189,10 @@ Trimming runs every 30 seconds, as one script, under these rules:
 - **Never past an active consumer's anchor entry** — for one that has read
   nothing yet, the block entry at or before its slot. The anchor entry itself
   is kept, so a restarting consumer can find it.
-- **Always at least `retain_blocks`** (default 2160, the security parameter)
+- **Always at least `--retain-blocks`** (default 2160, the security parameter)
   block entries behind the tail — a consumer restarting anywhere inside the
   rollback window can still anchor.
-- **A stale consumer pins at most `max_retained_blocks`** (default 43 200,
+- **A stale consumer pins at most `--max-retained-blocks`** (default 43 200,
   about two epochs) block entries. Beyond that it is trimmed past, and the
   consumer, finding its anchor gone, must refuse to resume from it and say so.
 
@@ -211,8 +213,8 @@ The contract, from the reading side:
 - Take the **last** entry id for a hash in `{ns}:slots`, and treat a member
   whose entry no longer exists as absent.
 - Write your anchor to `{ns}:consumers` after every commit. Silence for
-  `active_consumer_seconds` makes you stale: you stop holding the producer
-  back, and your data is kept only up to `max_retained_blocks`.
+  `--active-consumer-seconds` makes you stale: you stop holding the producer
+  back, and your data is kept only up to `--max-retained-blocks`.
 - On restart, refuse to anchor at an entry that has been trimmed, and say so.
 - Watch `heartbeat_ts`: a stream whose producer has stopped heartbeating is
   not going to grow.

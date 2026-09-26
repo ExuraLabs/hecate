@@ -6,22 +6,31 @@ way a real one would when that chain is swapped for a fork (see
 chain-sync, the buffer, the fenced writes — and assert on what a consumer
 would read: the entries in the stream, and that each one extends the last.
 
-The scenarios stop the follower through its ``stop`` event.
+The in-process scenarios stop the follower through its ``stop`` event. The
+exit-code tests run the CLI as a subprocess, the way a supervisor does.
 """
 
 from __future__ import annotations
 
 import asyncio
+import signal
+import sys
+import threading
 import time
-from collections.abc import AsyncIterator, Callable, Coroutine
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any, cast
 
 import orjson
 import pytest
+from ogmios import Point
 
+from epoch_derivation import epoch_start_slot
 from errors import LeaseLostError, StartPointRefusedError
-from tests.fake_ogmios import ANCHOR, FakeBlock, FakeOgmios, grow
+from models import EpochNumber
+from tests.conftest import REPO_ROOT
+from tests.fake_ogmios import ANCHOR, FakeBlock, FakeOgmios, block_hash, grow
 
 pytest.importorskip("redis", reason="follow writes to Redis")
 
@@ -42,6 +51,9 @@ QUICK = LivePolicy(
     trim_interval_seconds=0.1,
     backpressure_check_seconds=0.02,
 )
+
+#: Nothing listens here.
+DEAD_ENDPOINT = "ws://127.0.0.1:1"
 
 MAIN = grow(ANCHOR, 12)
 
@@ -464,3 +476,224 @@ def test_a_node_still_behind_the_start_point_is_waited_for(
 
     assert stream(conn) == blocks(MAIN[5:6])
     assert_chained(conn, MAIN[4])
+
+
+# -- resolving a start point --------------------------------------------------
+
+
+@contextmanager
+def fake_kupo(answer: dict[str, Any] | None) -> Iterator[tuple[str, list[str]]]:
+    """A kupo whose /checkpoints answers ``answer`` for any slot."""
+    requested: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            requested.append(self.path)
+            body = orjson.dumps(answer)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", requested
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_an_epoch_start_is_the_last_block_before_the_epoch() -> None:
+    answer = {"slot_no": ANCHOR.slot, "header_hash": ANCHOR.hash}
+    with fake_kupo(answer) as (url, requested):
+        point = live.resolve_start_point(epoch=600, kupo_url=url)
+
+    assert point == ANCHOR.point
+    assert requested == [f"/checkpoints/{epoch_start_slot(EpochNumber(600)) - 1}"]
+
+
+def test_a_slot_kupo_cannot_place_is_refused() -> None:
+    with fake_kupo(None) as (url, _):
+        with pytest.raises(StartPointRefusedError) as raised:
+            live.resolve_start_point(slot=1_000, kupo_url=url)
+
+    assert raised.value.exit_code == 17
+
+
+@pytest.mark.parametrize(
+    "request_",
+    [
+        {"point": ANCHOR.point, "slot": 1},
+        {"slot": 1, "epoch": 600},
+        {"slot": 1},
+    ],
+    ids=["point-and-slot", "slot-and-epoch", "slot-without-kupo"],
+)
+def test_ambiguous_or_unresolvable_start_requests_are_usage_errors(
+    request_: dict[str, Any],
+) -> None:
+    with pytest.raises(ValueError):
+        live.resolve_start_point(**request_)
+
+
+# -- the CLI, as a supervisor sees it ------------------------------------------
+
+
+async def follow_cli(*args: str) -> asyncio.subprocess.Process:
+    return await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "cli",
+        "follow",
+        "--namespace",
+        NS,
+        "--heartbeat-seconds",
+        "0.05",
+        "--lease-seconds",
+        "0.6",
+        *args,
+        cwd=REPO_ROOT,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+
+async def exit_of(process: asyncio.subprocess.Process) -> tuple[int, str]:
+    output, _ = await asyncio.wait_for(process.communicate(), timeout=60)
+    assert process.returncode is not None
+    return process.returncode, output.decode()
+
+
+def point_arg(point: Point) -> str:
+    return f"{point.slot}.{point.id}"
+
+
+def test_no_intersection_exits_15(conn: redis.Redis) -> None:
+    elsewhere = Point(slot=ANCHOR.slot + 10, id=block_hash("another chain"))
+
+    async def scenario() -> None:
+        async with FakeOgmios([ANCHOR, *MAIN[:3]]) as node:
+            code, output = await exit_of(
+                await follow_cli(
+                    "--endpoint", node.url, "--from-point", point_arg(elsewhere)
+                )
+            )
+        assert code == 15, output
+        assert "holds none of the 1 point(s)" in output
+
+    run(scenario)
+
+    assert stream(conn) == []
+    assert conn.get(PRODUCER) is None
+
+
+def test_a_start_too_far_behind_the_tip_exits_17(conn: redis.Redis) -> None:
+    far_ahead = grow(ANCHOR, 2, fork="later", slot_step=3 * 432_000)
+
+    async def scenario() -> None:
+        async with FakeOgmios([ANCHOR, *far_ahead]) as node:
+            code, output = await exit_of(
+                await follow_cli(
+                    "--endpoint", node.url, "--from-point", point_arg(ANCHOR.point)
+                )
+            )
+        assert code == 17, output
+        assert "--max-catchup-epochs" in output
+
+    run(scenario)
+
+    assert stream(conn) == []
+    assert "last_hash" not in state(conn), "a refused start anchored the stream"
+
+
+def test_nothing_to_start_from_exits_17_without_touching_ogmios(
+    conn: redis.Redis,
+) -> None:
+    async def scenario() -> None:
+        code, output = await exit_of(await follow_cli("--endpoint", DEAD_ENDPOINT))
+        assert code == 17, output
+        assert "no consumer has registered an anchor" in output
+
+    run(scenario)
+
+
+def test_a_block_that_breaks_the_chain_exits_18(conn: redis.Redis) -> None:
+    impostor = FakeBlock(
+        slot=MAIN[2].slot,
+        hash=block_hash("impostor"),
+        height=MAIN[2].height,
+        ancestor=block_hash("nobody"),
+    )
+
+    async def scenario() -> None:
+        async with FakeOgmios([ANCHOR, *MAIN[:2], impostor]) as node:
+            code, output = await exit_of(
+                await follow_cli(
+                    "--endpoint", node.url, "--from-point", point_arg(ANCHOR.point)
+                )
+            )
+        assert code == 18, output
+
+    run(scenario)
+
+    assert stream(conn) == [], "blocks held back past a break were published"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--from-point", "not-a-point"],
+        ["--from-slot", "5", "--from-epoch", "600", "--kupo-url", "http://127.0.0.1:1"],
+        ["--from-slot", "5"],
+        ["--lease-seconds", "0.1"],
+    ],
+    ids=["bad-point", "two-starts", "slot-without-kupo", "lease-too-short"],
+)
+def test_bad_options_are_usage_errors(args: list[str]) -> None:
+    async def scenario() -> None:
+        code, output = await exit_of(
+            await follow_cli("--endpoint", DEAD_ENDPOINT, *args)
+        )
+        assert code == 2, output
+
+    run(scenario)
+
+
+def test_the_cli_follows_from_an_epoch_and_stops_cleanly_on_sigterm(
+    conn: redis.Redis,
+) -> None:
+    answer = {"slot_no": ANCHOR.slot, "header_hash": ANCHOR.hash}
+
+    async def scenario() -> None:
+        with fake_kupo(answer) as (kupo_url, requested):
+            async with FakeOgmios([ANCHOR, *MAIN[:4]]) as node:
+                process = await follow_cli(
+                    "--endpoint",
+                    node.url,
+                    "--from-epoch",
+                    "600",
+                    "--kupo-url",
+                    kupo_url,
+                )
+                deadline = time.monotonic() + 30
+                while tail(conn) != MAIN[1].hash:
+                    assert process.returncode is None, await exit_of(process)
+                    assert time.monotonic() < deadline, "the CLI relayed nothing"
+                    await asyncio.sleep(0.05)
+
+                process.send_signal(signal.SIGTERM)
+                code, output = await exit_of(process)
+
+        assert code == 0, output
+        assert requested == [f"/checkpoints/{epoch_start_slot(EpochNumber(600)) - 1}"]
+
+    run(scenario)
+
+    assert stream(conn) == blocks(MAIN[:2])
+    assert conn.get(PRODUCER) is None, "SIGTERM left the lease to lapse"
