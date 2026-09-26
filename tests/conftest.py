@@ -17,14 +17,15 @@ Neither available, or the ``redis`` dependency group not installed, and
 everything here skips rather than erroring: none of it means anything
 without a Redis to be wrong about.
 
-Relaying real blocks is the expensive part, so most tests fake an
+Relaying real blocks is the expensive part, so most backfill tests fake an
 already-finished relay with the ``publish`` fixture and exercise the
 pre-flight checks, which run before a single block is fetched. Only the ones
 that must see blocks move need Ogmios::
 
     HECATE_TEST_OGMIOS=ws://your-server:1337 uv run pytest
 
-Without that variable those tests skip; the rest still run.
+Without that variable those tests skip; the rest still run. The live-follow
+tests never need it: they serve their own chain from ``tests/fake_ogmios.py``.
 """
 
 from __future__ import annotations

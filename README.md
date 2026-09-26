@@ -203,9 +203,11 @@ suite borrowed is handed back empty.
 
 Everything degrades to skips rather than errors: no Redis to be had, or an
 install without the `redis` dependency group, and the suite reports why and
-passes. The tests that must see blocks move ask for an Ogmios endpoint the
-same way; the rest — window refusals, purge safety, `status` — run against
-faked sink state and finish in seconds.
+passes. The backfill tests that must see blocks move ask for an Ogmios endpoint
+the same way; the rest — window refusals, purge safety, `status` — run against
+faked sink state and finish in seconds. The `follow` tests need no Ogmios at
+all: they drive it against an in-process fake (`tests/fake_ogmios.py`) that
+serves a chain each test controls, forks included.
 
 ### Type Checking and Linting
 

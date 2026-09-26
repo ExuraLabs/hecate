@@ -1,17 +1,18 @@
 # Redis Live Stream
 
-`RedisLiveSink`, in [`sinks/redis_live.py`](../sinks/redis_live.py), is a sink
-for blocks off the chain tip. It is a `RollbackRelay` for `BufferedSink`, and
-puts what the buffer lets through — blocks, and the rollbacks deeper than the
-buffer — into **one Redis stream per namespace**, which any number of
-consumers read independently. It is one downstream shape among others: a list
-fed with `LPUSH`, or messages on a queue, would be sinks of their own, with
-contracts of their own.
+`RedisLiveSink`, in [`sinks/redis_live.py`](../sinks/redis_live.py), is the
+sink the [live follow](follow.md) writes to. It puts what the relay delivers —
+blocks off the chain tip, and the rollbacks that
+[reach past its buffer](follow.md#rollbacks-and-depth) — into **one Redis
+stream per namespace**, which any number of consumers read independently. It
+is one downstream shape among others: a list fed with `LPUSH`, or messages on
+a queue, would be sinks of their own, with contracts of their own.
 
 This page is that stream's consumer contract, **v1**: the producer is the only
 writer, and consumers may rely on everything it states. It also covers what
-the sink does beyond delivery — the producer lease, backpressure and
-retention — with each knob named by the `LivePolicy` field that sets it.
+`follow` relies on this sink for beyond delivery — where a run starts, the
+producer lease, backpressure and retention — with each knob named by the
+`LivePolicy` field or `follow()` parameter that sets it.
 
 ## The stream (contract v1)
 
@@ -48,7 +49,8 @@ enforces this atomically at write time (see [fencing](#fencing)); consumers
 should verify it on every block regardless.
 
 The same block can appear more than once: published, rolled back, published
-again once the chain returns to it.
+again once the chain returns to it. A resumed follower re-publishes whatever
+it rolls back over, too.
 
 ### `{ns}:slots` — the index
 
@@ -93,7 +95,7 @@ A hash, one field per consumer group, value JSON:
 
 Each consumer writes its own after every commit: the point it has applied
 through, the stream entry that point came from, and when. **The producer only
-reads it**: for backpressure and retention.
+reads it**: to pick a start point, and for backpressure and retention.
 
 A consumer that has not read an entry of this stream yet — one anchored at the
 end of a backfill, say — writes `entry_id` as `""` or `null`. While active, it
@@ -119,10 +121,49 @@ can resume believing it still holds a lease that lapsed. The lease plus the
 link check make a second writer impossible in both cases: the stale one's next
 write is refused, whatever it believes.
 
+## Start point
+
+On its first connection a follower picks where to start, in this order:
+
+1. **A non-empty stream resumes from its canonical tail.** An explicit start
+   is then accepted only if it names that exact tail; any other point is
+   refused (`StartPointRefusedError`), because publishing from it would break
+   the order invariant. So an explicit start is for the first run of a
+   namespace only.
+2. **An empty stream with an explicit start** begins there. The first block
+   published is the one right after the point, and names it as `ancestor`.
+3. **An empty stream with registered consumers** begins at the lowest-slot
+   anchor among them, active or stale.
+4. **Otherwise** it is refused (`StartPointRefusedError`).
+
+It then asks Ogmios to intersect:
+
+- On a non-empty stream it offers the stream's **canonical points**, newest
+  first: the stream is walked back applying its rollbacks, and every one of the
+  newest 16 is offered, then every power-of-two-th point back to the security
+  parameter (2160 blocks), then the oldest reached. The intersection is then at
+  most about twice as deep as the real fork.
+- If the intersection is **below the tail**, the tail was orphaned while
+  nobody was relaying. A `rollback` entry to the intersection is published
+  first, then relaying resumes from there.
+- If the node holds none of the points **and its tip is past them**, it stops
+  with `IntersectionNotFoundError`. If its tip is **behind** the newest point
+  offered, the node is still syncing: the follower waits and asks again every
+  10 seconds, writing nothing. The same holds for an intersection below the
+  tail while the node's tip is behind the tail: a node that has not reached
+  the tail yet is not evidence of a fork.
+- `max_catchup_epochs` (default 2) bounds how far behind the node's tip the
+  start may be. It applies when a follower starts, including when it resumes
+  a stream after downtime; reconnects while running are not bounded. Past it,
+  the start is refused (`StartPointRefusedError`) before anything is written:
+  the live path is one entry per block for every consumer to replay, and a
+  stretch of epochs is what the backfill is for. Raise it deliberately for a
+  single start.
+
 ## Backpressure
 
 A consumer is **active** if its `updated_at` is within
-`active_consumer_seconds` (default 600). The producer pauses while
+`active_consumer_seconds` (default 600). The producer pauses fetching while
 the **slowest active consumer's anchor** is more than `max_unconsumed_blocks`
 (default 10 000) block entries behind the tail, counted as the `{ns}:slots`
 members above the anchor's slot. While paused it sets `paused=1` and

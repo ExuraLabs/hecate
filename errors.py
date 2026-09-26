@@ -2,14 +2,17 @@
 
 One hierarchy, in one module, so ``except BackfillError`` catches everything a
 backfill can fail with and ``except FollowError`` everything a follow can —
-including the failures raised from inside a sink, which is why these do not
-live beside an entry point.
+including the failures raised from inside a sink or the Ogmios client, which is
+why these do not live beside either entry point.
 
 Each class carries the process exit code the CLI uses for it. **That code is
 the stable contract for anything driving Hecate as a subprocess** — the message
 text is written for people to read and may be reworded, so classify on the
 code, not on the prose.
 """
+
+from collections.abc import Sequence
+from typing import Any
 
 from models import EpochNumber
 
@@ -156,6 +159,32 @@ class FollowError(HecateError):
     """
 
 
+def _describe_point(point: Any) -> str:
+    return f"{point.slot}.{point.id}"
+
+
+class IntersectionNotFoundError(FollowError):
+    """Ogmios holds none of the points the follower asked to start from.
+
+    The node's tip is past all of them, so this is not a node that is still
+    syncing: the stream's recent history is not on the node's chain at all —
+    a different network, or a fork deeper than the points offered.
+    """
+
+    exit_code = 15
+
+    def __init__(self, *, points: Sequence[Any], tip: Any):
+        self.points = list(points)
+        self.tip = tip
+        offered = ", ".join(_describe_point(point) for point in self.points[:3])
+        more = f" and {len(self.points) - 3} older" if len(self.points) > 3 else ""
+        super().__init__(
+            f"the node (tip {_describe_point(tip)}) holds none of the "
+            f"{len(self.points)} point(s) offered: {offered}{more}. Check that "
+            f"Ogmios serves the network this stream was built from."
+        )
+
+
 class FencedOutError(FollowError):
     """This follower may no longer write to the stream.
 
@@ -193,6 +222,20 @@ class TailMovedError(FencedOutError):
         )
 
 
+class StartPointRefusedError(FollowError):
+    """No acceptable point to start following from.
+
+    Raised before anything is written: nothing was asked for, the point asked
+    for contradicts the stream, or it is further behind the tip than the
+    follower was allowed to catch up.
+    """
+
+    exit_code = 17
+
+    def __init__(self, reason: str):
+        super().__init__(f"refusing to start: {reason}")
+
+
 class ChainLinkError(FollowError):
     """A block or rollback does not fit the chain relayed so far.
 
@@ -215,9 +258,11 @@ __all__ = [
     "FencedOutError",
     "FollowError",
     "HecateError",
+    "IntersectionNotFoundError",
     "LeaseLostError",
     "NoRegisteredConsumerError",
     "OrderingStalledError",
+    "StartPointRefusedError",
     "TailMovedError",
     "UnreachableWindowError",
     "UnsafePurgeError",
