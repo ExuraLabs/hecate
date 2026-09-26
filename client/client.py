@@ -97,16 +97,21 @@ class HecateClient(OgmiosClient):  # type: ignore[misc]
         self.connection = None
 
     async def send(self, request: str) -> None:
-        """Send a request to the Ogmios server."""
+        """Send a request to the Ogmios server.
+
+        A closed or missing connection raises ``ConnectionError``, the same
+        family as a dropped socket, so a caller that reconnects on transport
+        failures does not have to tell the two apart.
+        """
         if not self.connection or self.connection.state != State.OPEN:
-            raise RuntimeError("No connection available")
+            raise ConnectionError("No connection available")
 
         await self.connection.send(request)
 
     async def receive(self) -> dict[str, Any]:
         """Receive a response from the Ogmios server."""
         if not self.connection or self.connection.state != State.OPEN:
-            raise RuntimeError("No connection available")
+            raise ConnectionError("No connection available")
 
         raw_response = await self.connection.recv()
         resp: dict[str, Any] = json.loads(raw_response)

@@ -33,6 +33,13 @@ with open(Path(__file__).parent / "data/epoch_boundaries.csv", mode="r") as file
 
 FIRST_SHELLEY_EPOCH = EpochNumber(208)
 
+#: Key namespace of the live stream `follow` writes; see docs/live-stream.md.
+DEFAULT_LIVE_NAMESPACE = "hecate:live"
+
+#: Mainnet's security parameter k: the deepest rollback a node will perform,
+#: in blocks. Anything further back is immutable.
+SECURITY_PARAMETER = 2160
+
 STAKE_CREDENTIAL_DEPOSIT = {"ada": {"lovelace": 2_000_000}}
 
 ERA_BOUNDARY = {  # Slot and hash of the last block of the era. Useful for testing.

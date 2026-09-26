@@ -1,8 +1,9 @@
-"""Failures a backfill can raise.
+"""Failures a backfill or a live follow can raise.
 
 One hierarchy, in one module, so ``except BackfillError`` catches everything a
-run can fail with — including the failures raised from inside a sink, which is
-why these do not live in ``backfill.py``.
+backfill can fail with and ``except FollowError`` everything a follow can —
+including the failures raised from inside a sink or the Ogmios client, which is
+why these do not live beside either entry point.
 
 Each class carries the process exit code the CLI uses for it. **That code is
 the stable contract for anything driving Hecate as a subprocess** — the message
@@ -10,11 +11,14 @@ text is written for people to read and may be reworded, so classify on the
 code, not on the prose.
 """
 
+from collections.abc import Sequence
+from typing import Any
+
 from models import EpochNumber
 
 
-class BackfillError(RuntimeError):
-    """Base class for every way a backfill can fail.
+class HecateError(RuntimeError):
+    """Root of every failure Hecate reports with its own exit code.
 
     Exit codes start at 10 to stay clear of 1 and 2, which the shell and
     Click already spend on generic and usage failures.
@@ -22,6 +26,10 @@ class BackfillError(RuntimeError):
 
     #: Process exit code the CLI reports for this failure.
     exit_code: int = 1
+
+
+class BackfillError(HecateError):
+    """Base class for every way a backfill can fail."""
 
 
 class EpochsFailedError(BackfillError):
@@ -144,12 +152,121 @@ class ConsumerNotFinishedError(UnsafePurgeError):
         )
 
 
+class FollowError(HecateError):
+    """Base class for every way a live follow can stop short of being told to.
+
+    Codes continue where the backfill's leave off. A supervisor should restart
+    on ``FencedOutError`` (the restarted follower waits as standby) and on any
+    code outside this hierarchy; the rest need a person, because restarting
+    would only repeat them.
+    """
+
+
+def _describe_point(point: Any) -> str:
+    return f"{point.slot}.{point.id}"
+
+
+class IntersectionNotFoundError(FollowError):
+    """Ogmios holds none of the points the follower asked to start from.
+
+    The node's tip is past all of them, so this is not a node that is still
+    syncing: the stream's recent history is not on the node's chain at all —
+    a different network, or a fork deeper than the points offered.
+    """
+
+    exit_code = 15
+
+    def __init__(self, *, points: Sequence[Any], tip: Any):
+        self.points = list(points)
+        self.tip = tip
+        offered = ", ".join(_describe_point(point) for point in self.points[:3])
+        more = f" and {len(self.points) - 3} older" if len(self.points) > 3 else ""
+        super().__init__(
+            f"the node (tip {_describe_point(tip)}) holds none of the "
+            f"{len(self.points)} point(s) offered: {offered}{more}. Check that "
+            f"Ogmios serves the network this stream was built from."
+        )
+
+
+class FencedOutError(FollowError):
+    """This follower may no longer write to the stream.
+
+    Every write re-checks that the follower still holds the lease and that the
+    stream's tail is where this follower left it. Either failing means another
+    writer may have moved the stream, so nothing this process believes about
+    the tail can be trusted. Restarting is the remedy: the new process waits as
+    standby and re-reads the tail if it takes over.
+    """
+
+    exit_code = 16
+
+
+class LeaseLostError(FencedOutError):
+    """The producer lease expired or is held by another follower."""
+
+    def __init__(self, *, producer_id: str, holder: str | None):
+        self.producer_id = producer_id
+        self.holder = holder
+        held = f"is held by {holder}" if holder else "has expired"
+        super().__init__(
+            f"the producer lease {held}; {producer_id} is no longer the writer"
+        )
+
+
+class TailMovedError(FencedOutError):
+    """The stream's tail is not where this follower last wrote it."""
+
+    def __init__(self, *, expected: str, found: str | None):
+        self.expected = expected
+        self.found = found
+        super().__init__(
+            f"the stream's tail is {found or 'unset'}, not {expected}: "
+            f"something other than this follower wrote to it"
+        )
+
+
+class StartPointRefusedError(FollowError):
+    """No acceptable point to start following from.
+
+    Raised before anything is written: nothing was asked for, the point asked
+    for contradicts the stream, or it is further behind the tip than the
+    follower was allowed to catch up.
+    """
+
+    exit_code = 17
+
+    def __init__(self, reason: str):
+        super().__init__(f"refusing to start: {reason}")
+
+
+class ChainLinkError(FollowError):
+    """A block or rollback does not fit the chain relayed so far.
+
+    Each block names its predecessor; one naming anything else, or a rollback
+    to a point that cannot be on the chain relayed so far, means the upstream
+    broke the chain-sync contract. Nothing is published from the break onwards.
+    """
+
+    exit_code = 18
+
+    def __init__(self, detail: str):
+        super().__init__(f"chain-link violation: {detail}")
+
+
 __all__ = [
     "BackfillError",
+    "ChainLinkError",
     "ConsumerNotFinishedError",
     "EpochsFailedError",
+    "FencedOutError",
+    "FollowError",
+    "HecateError",
+    "IntersectionNotFoundError",
+    "LeaseLostError",
     "NoRegisteredConsumerError",
     "OrderingStalledError",
+    "StartPointRefusedError",
+    "TailMovedError",
     "UnreachableWindowError",
     "UnsafePurgeError",
 ]

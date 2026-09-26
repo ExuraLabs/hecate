@@ -1,10 +1,12 @@
 from collections import deque
 from contextlib import AbstractAsyncContextManager
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from dataclasses import dataclass
+from typing import Any, Protocol, runtime_checkable
 
-from ogmios import Block
+from ogmios import Block, Point
 
-from models import BlockHeight, EpochNumber, Slot
+from errors import ChainLinkError
+from models import BlockHeight, EpochNumber
 
 
 def prepare_block(block: Block) -> dict[str, Any]:
@@ -159,85 +161,145 @@ class DataSink(BlockRelay, Protocol):
         ...
 
 
-T = TypeVar("T", bound=DataSink)
+class RollbackRelay(Protocol):
+    """A relay that can be told the chain rolled back past what it holds.
+
+    What ``BufferedSink`` needs downstream: blocks in chain order, and word
+    of any rollback deeper than the blocks it is still holding back.
+    """
+
+    async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:
+        """Send blocks that each extend the one before, oldest first."""
+        ...
+
+    async def send_rollback(self, point: Point, **kwargs: Any) -> None:
+        """Record that everything relayed after ``point`` is no longer on chain."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class _Held:
+    """A block not yet relayed, with the context it arrived with."""
+
+    block: Block
+    context: dict[str, Any]
 
 
 class BufferedSink:
-    """
-    Wrapper for any DataSink that buffers blocks until they reach
-    the required confirmation depth before sending them downstream. Useful for live tracking.
+    """Holds the newest ``depth`` blocks back, so shallow rollbacks never escape.
+
+    Most rollbacks at the tip are a block or two deep. A block is relayed
+    downstream only once ``depth`` blocks have been built on top of it, so a
+    rollback that lands among the blocks still held is absorbed here: the
+    blocks after the rollback point are dropped and downstream never learns
+    they existed. Only a rollback below everything held reaches downstream,
+    as ``send_rollback``.
+
+    Every block is checked to extend the one before it — the newest held
+    block, else the last point relayed (``base``) — and a rollback must name a
+    point on that chain. Anything else raises ``ChainLinkError`` before the
+    buffer changes, since relaying past a break would hand downstream a chain
+    that does not exist.
+
+    ``base`` starts as the point the chain is being followed from: the first
+    block must name it as its ancestor.
     """
 
-    def __init__(self, sink: T, confirmation_depth: int = 5):
-        """
-        Initialize with any DataSink implementation and confirmation depth.
-
-        Args:
-            sink: Any DataSink implementation
-            confirmation_depth: Number of blocks to wait before confirming
-        """
+    def __init__(self, sink: RollbackRelay, *, base: Point, depth: int = 2):
+        if depth < 0:
+            raise ValueError(f"depth must be at least 0, got {depth}")
         self.sink = sink
-        self.confirmation_depth = confirmation_depth
-        self.buffer: deque[Block] = deque()
-        self.last_confirmed_slot = 0
+        self.depth = depth
+        #: The newest point relayed downstream, or the starting point.
+        self.base: Point = base
+        self.held: deque[_Held] = deque()
 
-    async def send_block(self, block: Block) -> None:
-        self.buffer.append(block)
-        await self._flush_confirmed()
+    @property
+    def head(self) -> Point:
+        """The newest point this buffer knows of, relayed or not."""
+        if self.held:
+            newest = self.held[-1].block
+            return Point(slot=newest.slot, id=newest.id)
+        return self.base
 
-    async def send_batch(self, blocks: list[Block]) -> None:
+    async def send_block(self, block: Block, **kwargs: Any) -> None:
+        await self.send_batch([block], **kwargs)
+
+    async def send_batch(self, blocks: list[Block], **kwargs: Any) -> None:
+        """Hold ``blocks`` and relay whichever now have ``depth`` successors.
+
+        ``kwargs`` travel with each block and reach downstream with it, so a
+        block relayed later still carries the context it arrived with.
         """
-        Buffer all blocks in the batch and flush any confirmed blocks.
-        """
+        head = self.head
         for block in blocks:
-            self.buffer.append(block)
+            if block.ancestor != head.id:
+                raise ChainLinkError(
+                    f"block {block.slot}.{block.id} names ancestor "
+                    f"{block.ancestor}, but the chain so far ends at "
+                    f"{head.slot}.{head.id}"
+                )
+            head = Point(slot=block.slot, id=block.id)
 
-        await self._flush_confirmed()
+        self.held.extend(_Held(block, dict(kwargs)) for block in blocks)
+        await self._release()
 
-    async def get_status(self) -> dict[str, Any]:
+    async def rollback_to(self, point: Point, **kwargs: Any) -> None:
+        """Discard everything after ``point``, telling downstream only if it must.
+
+        A point among the held blocks, or the last point relayed, is absorbed
+        here. A point below that empties the buffer and is passed downstream
+        with ``kwargs``.
         """
-        Get underlying sink status along with buffer information.
-        """
-        sink_status = await self.sink.get_status()
-        buffer_status = {
-            "buffered_blocks": len(self.buffer),
-            "confirmation_depth": self.confirmation_depth,
-            "last_confirmed_slot": self.last_confirmed_slot,
-        }
-
-        return {**sink_status, "buffer": buffer_status}
-
-    async def close(self) -> None:
-        await self.sink.close()
-
-    async def _flush_confirmed(self) -> None:
-        """
-        Send all blocks that have reached confirmation depth.
-        """
-        if len(self.buffer) <= self.confirmation_depth:
-            return  # Not enough blocks to confirm any
-
-        to_flush = len(self.buffer) - self.confirmation_depth
-
-        if to_flush <= 0:
+        keep = self._held_through(point)
+        if keep is not None:
+            while len(self.held) > keep:
+                self.held.pop()
             return
 
-        # Send the confirmed blocks downstream
-        confirmed_blocks = []
-        for _ in range(to_flush):
-            block = self.buffer.popleft()
-            confirmed_blocks.append(block)
-            # Track last confirmed slot
-            slot = block.slot
-            if slot > self.last_confirmed_slot:
-                self.last_confirmed_slot = slot
+        if point.slot >= self.base.slot:
+            raise ChainLinkError(
+                f"rollback to {point.slot}.{point.id}, which is not on the "
+                f"chain held here (relayed through {self.base.slot}."
+                f"{self.base.id}, holding {len(self.held)} more)"
+            )
 
-        if confirmed_blocks:
-            await self.sink.send_batch(confirmed_blocks)
+        self.held.clear()
+        await self.sink.send_rollback(point, **kwargs)
+        self.base = point
 
-    async def rollback_to_slot(self, rollback_slot: Slot) -> None:
+    def _held_through(self, point: Point) -> int | None:
+        """How many held blocks survive a rollback to ``point``.
+
+        None when ``point`` is neither a held block nor the base. A point
+        whose slot matches but whose hash does not is someone else's block at
+        that slot, never ours.
         """
-        Handle a rollback by removing affected blocks from the buffer.
+        for index in range(len(self.held) - 1, -1, -1):
+            block = self.held[index].block
+            if block.slot == point.slot and block.id == point.id:
+                return index + 1
+        if self.base.slot == point.slot and self.base.id == point.id:
+            return 0
+        return None
+
+    async def _release(self) -> None:
+        """Relay every block that now has ``depth`` blocks on top of it.
+
+        Consecutive blocks that arrived with the same context go downstream
+        in one batch; the base only advances once downstream has taken them.
         """
-        while self.buffer and self.buffer[0].slot != rollback_slot:
-            self.buffer.popleft()
+        while len(self.held) > self.depth:
+            first = self.held[0]
+            run = [first.block]
+            while (
+                len(self.held) - len(run) > self.depth
+                and self.held[len(run)].context == first.context
+            ):
+                run.append(self.held[len(run)].block)
+
+            await self.sink.send_batch(run, **first.context)
+            for _ in run:
+                self.held.popleft()
+            last = run[-1]
+            self.base = Point(slot=last.slot, id=last.id)

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from ogmios import Block
+from ogmios import Block, Point
 from rich.console import Console
 from rich.panel import Panel
 from rich.pretty import Pretty
@@ -11,10 +11,10 @@ from rich.table import Table
 class CLISink:
     """A pretty CLI data sink using rich.
 
-    Structurally implements ``sinks.base.DataSink`` — the zero-dependency
-    relay target, useful for eyeballing a range without a Redis in the
-    picture. It carries no ``EpochCoordinator`` surface, so a backfill
-    against it has no resumability and no backpressure.
+    Structurally implements ``sinks.base.DataSink`` and ``RollbackRelay`` —
+    the zero-dependency relay target, useful for eyeballing a range without a
+    Redis in the picture. It carries no ``EpochCoordinator`` surface, so a
+    backfill against it has no resumability and no backpressure.
     """
 
     def __init__(self, max_history: int = 5):
@@ -79,6 +79,14 @@ class CLISink:
         )
 
         self.console.print(table)
+
+    async def send_rollback(self, point: Point, **kwargs: Any) -> None:
+        """Announce that everything printed after ``point`` is off the chain."""
+        self.stats["last_block_hash"] = point.id
+        self.stats["last_block_slot"] = point.slot
+        self.console.print(
+            f"[bold yellow]Rolled back to slot {point.slot}[/] ({point.id[:8]}...)"
+        )
 
     async def get_status(self) -> dict[str, Any]:
         uptime = datetime.now() - self.stats["start_time"]

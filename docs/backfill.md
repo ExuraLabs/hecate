@@ -105,7 +105,8 @@ change.
 All of these subclass `errors.BackfillError`, and both purge failures subclass
 `errors.UnsafePurgeError`, so a library caller can catch at whatever granularity
 it needs. Codes start at 10 to stay clear of 1 and 2, which the shell and Click
-already spend on generic and usage failures.
+already spend on generic and usage failures. Codes 15 and up belong to
+[`follow`](follow.md#exit-codes).
 
 ## Bounded windows and the ordering base
 

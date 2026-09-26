@@ -59,19 +59,29 @@ async def peek_first_block_after(client: HecateClient, point: Point) -> Block:
     return blocks[0]
 
 
+def kupo_point_at(kupo_url: str, slot: Slot) -> Point:
+    """Last block at or before ``slot``, via kupo's closest-ancestor checkpoint.
+
+    Kupo answers ``null`` when it holds no checkpoint that early — a pruned or
+    freshly started index — which is raised rather than guessed around.
+    """
+    resp = requests.get(
+        f"{kupo_url.rstrip('/')}/checkpoints/{slot}", timeout=KUPO_TIMEOUT_SECONDS
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data is None:
+        raise LookupError(f"kupo holds no checkpoint at or before slot {slot}")
+    return Point(slot=Slot(int(data["slot_no"])), id=BlockHash(data["header_hash"]))
+
+
 def kupo_end_point(kupo_url: str, epoch: EpochNumber) -> Point:
     """Last block at or before the final slot of ``epoch``, via kupo (one call).
 
     Queries the closest-ancestor checkpoint for the last slot that still belongs
     to ``epoch`` (``epoch_start_slot(epoch + 1) - 1``).
     """
-    last_slot = epoch_start_slot(EpochNumber(epoch + 1)) - 1
-    resp = requests.get(
-        f"{kupo_url.rstrip('/')}/checkpoints/{last_slot}", timeout=KUPO_TIMEOUT_SECONDS
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return Point(slot=Slot(int(data["slot_no"])), id=BlockHash(data["header_hash"]))
+    return kupo_point_at(kupo_url, Slot(epoch_start_slot(EpochNumber(epoch + 1)) - 1))
 
 
 def _assert_astride(epoch: EpochNumber, end_slot: Slot, next_first: Block) -> None:
